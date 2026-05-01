@@ -1,0 +1,47 @@
+from __future__ import annotations
+
+from fastapi import APIRouter, Depends
+from sqlalchemy.orm import Session
+
+from app.db.session import get_db
+from app.schemas.camera_schema import CameraCreate, CameraOut
+from app.services import camera_service
+
+router = APIRouter(prefix="/api/cameras", tags=["cameras"])
+
+
+@router.post("", response_model=CameraOut)
+def create_camera(payload: CameraCreate, db: Session = Depends(get_db)):
+    return camera_service.create_camera(db, payload)
+
+
+@router.get("", response_model=list[CameraOut])
+def list_cameras(db: Session = Depends(get_db)):
+    return camera_service.list_cameras(db)
+
+
+@router.get("/{camera_id}", response_model=CameraOut)
+def get_camera(camera_id: str, db: Session = Depends(get_db)):
+    return camera_service.get_camera(db, camera_id)
+
+
+@router.post("/{camera_id}/start", response_model=CameraOut)
+def start_camera(camera_id: str, db: Session = Depends(get_db)):
+    return camera_service.start_camera(db, camera_id)
+
+
+@router.post("/{camera_id}/stop", response_model=CameraOut)
+def stop_camera(camera_id: str, db: Session = Depends(get_db)):
+    return camera_service.stop_camera(db, camera_id)
+
+
+@router.post("/{camera_id}/restart", response_model=CameraOut)
+def restart_camera(camera_id: str, db: Session = Depends(get_db)):
+    return camera_service.restart_camera(db, camera_id)
+
+
+@router.delete("/{camera_id}")
+def delete_camera(camera_id: str, db: Session = Depends(get_db)):
+    camera_service.delete_camera(db, camera_id)
+    return {"deleted": True}
+

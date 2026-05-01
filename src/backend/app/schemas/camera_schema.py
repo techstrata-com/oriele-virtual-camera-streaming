@@ -1,0 +1,37 @@
+from __future__ import annotations
+
+from datetime import datetime
+from typing import Optional
+
+from pydantic import BaseModel, Field
+
+
+class CameraCreate(BaseModel):
+    name: str
+    video_id: str
+    device_path: str = Field(..., examples=["/dev/video10"])
+    fps: Optional[float] = None
+    width: Optional[int] = None
+    height: Optional[int] = None
+    loop: bool = True
+
+
+class CameraOut(BaseModel):
+    id: str
+    name: str
+    video_id: str
+    device_path: str
+    status: str
+    pid: Optional[int] = None
+    fps: Optional[float] = None
+    width: Optional[int] = None
+    height: Optional[int] = None
+    loop: bool
+    created_at: datetime
+    updated_at: datetime
+    last_started_at: Optional[datetime] = None
+    last_stopped_at: Optional[datetime] = None
+
+    class Config:
+        from_attributes = True
+

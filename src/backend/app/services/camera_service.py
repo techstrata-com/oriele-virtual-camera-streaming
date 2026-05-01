@@ -1,9 +1,11 @@
 from __future__ import annotations
 
+import os
 import platform
 import subprocess
 import sys
 import time
+import logging
 from datetime import datetime
 from pathlib import Path
 from typing import List
@@ -27,6 +29,8 @@ VALID_STATUSES = {
     "stopping",
     "failed",
 }
+
+logger = logging.getLogger(__name__)
 
 
 def list_cameras(db: Session) -> List[Camera]:
@@ -140,12 +144,26 @@ def start_camera(db: Session, camera_id: str) -> Camera:
         log_file.write("CMD: " + " ".join(cmd) + "\n")
         log_file.flush()
 
-        proc = subprocess.Popen(
-            cmd,
-            cwd=str(Path(__file__).resolve().parents[2]),  # `src/backend`
-            stdout=log_file,
-            stderr=subprocess.STDOUT,
-            text=True,
+        popen_kwargs = {
+            "cwd": str(Path(__file__).resolve().parents[2]),  # `src/backend`
+            "stdout": log_file,
+            "stderr": subprocess.STDOUT,
+            "stdin": subprocess.DEVNULL,
+            "text": True,
+            "close_fds": True,
+        }
+        if platform.system().lower().startswith("win"):
+            popen_kwargs["creationflags"] = (
+                subprocess.CREATE_NEW_PROCESS_GROUP | subprocess.DETACHED_PROCESS
+            )
+
+        proc = subprocess.Popen(cmd, **popen_kwargs)
+        logger.info(
+            "Started camera worker camera_id=%s worker_pid=%s backend_pid=%s os=%s",
+            cam.id,
+            proc.pid,
+            os.getpid(),
+            platform.system(),
         )
 
         # Give the worker a moment to fail fast if pyvirtualcam can't initialize.
@@ -174,10 +192,22 @@ def stop_camera(db: Session, camera_id: str) -> Camera:
     cam = get_camera(db, camera_id)
 
     if cam.pid:
+        pid = cam.pid
+        logger.info(
+            "Stop camera requested camera_id=%s pid=%s os=%s",
+            cam.id,
+            pid,
+            platform.system(),
+        )
         try:
-            stop_process(cam.pid)
+            stop_process(pid)
+        except Exception:
+            # Never crash the API on stop; log and proceed to mark camera stopped.
+            logger.exception("Failed to stop worker process camera_id=%s pid=%s", cam.id, pid)
         finally:
             cam.pid = None
+    else:
+        logger.info("Stop camera requested camera_id=%s pid=None (already stopped?)", cam.id)
 
     cam.status = "stopped"
     cam.last_stopped_at = datetime.utcnow()

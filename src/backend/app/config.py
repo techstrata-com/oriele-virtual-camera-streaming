@@ -24,6 +24,7 @@ def get_settings() -> Settings:
     project_root = Path(__file__).resolve().parents[3]
     data_dir = project_root / "data"
     data_dir.mkdir(parents=True, exist_ok=True)
+    (data_dir / "logs").mkdir(parents=True, exist_ok=True)
     return Settings(
         project_root=project_root,
         data_dir=data_dir,

@@ -9,7 +9,9 @@ from pydantic import BaseModel, Field
 class CameraCreate(BaseModel):
     name: str
     video_id: str
-    device_path: str = Field(..., examples=["/dev/video10"])
+    # Linux: /dev/video10, /dev/video11, ...
+    # macOS/Windows (OBS): "obs" or "auto" (device is selected by pyvirtualcam backend)
+    device_path: str = Field(..., examples=["/dev/video10", "obs", "auto"])
     fps: Optional[float] = None
     width: Optional[int] = None
     height: Optional[int] = None

@@ -26,7 +26,7 @@ def _handle_signal(signum, frame):  # noqa: ARG001
 class WorkerArgs:
     camera_id: str
     video_path: Path
-    device_path: str
+    device_path: Optional[str]
     fps: Optional[float]
     width: Optional[int]
     height: Optional[int]
@@ -37,7 +37,8 @@ def parse_args(argv: list[str]) -> WorkerArgs:
     parser = argparse.ArgumentParser(description="Virtual camera worker")
     parser.add_argument("--camera-id", required=True)
     parser.add_argument("--video-path", required=True)
-    parser.add_argument("--device-path", required=True)
+    # Linux: use /dev/videoX. macOS/Windows: omit to use default backend (e.g., OBS Virtual Camera).
+    parser.add_argument("--device-path", required=False, default=None)
     parser.add_argument("--fps", type=float, default=None)
     parser.add_argument("--width", type=int, default=None)
     parser.add_argument("--height", type=int, default=None)
@@ -51,7 +52,7 @@ def parse_args(argv: list[str]) -> WorkerArgs:
     return WorkerArgs(
         camera_id=ns.camera_id,
         video_path=Path(ns.video_path),
-        device_path=ns.device_path,
+        device_path=(ns.device_path.strip() if isinstance(ns.device_path, str) and ns.device_path.strip() else None),
         fps=ns.fps,
         width=ns.width,
         height=ns.height,
@@ -63,7 +64,7 @@ def main(argv: list[str]) -> int:
     args = parse_args(argv)
     print(f"[worker] camera_id={args.camera_id}", flush=True)
     print(f"[worker] video_path={args.video_path}", flush=True)
-    print(f"[worker] device_path={args.device_path}", flush=True)
+    print(f"[worker] device_path={args.device_path or '(auto)'}", flush=True)
     print(f"[worker] fps={args.fps} width={args.width} height={args.height} loop={args.loop}", flush=True)
 
     if not args.video_path.exists():
@@ -86,14 +87,17 @@ def main(argv: list[str]) -> int:
 
         print(f"[worker] source={src_w}x{src_h}@{src_fps} output={out_w}x{out_h}@{fps}", flush=True)
 
-        with pyvirtualcam.Camera(
+        cam_kwargs = dict(
             width=out_w,
             height=out_h,
             fps=fps,
-            device=args.device_path,
             fmt=PixelFormat.BGR,
             print_fps=False,
-        ) as cam:
+        )
+        if args.device_path:
+            cam_kwargs["device"] = args.device_path
+
+        with pyvirtualcam.Camera(**cam_kwargs) as cam:
             print(f"[worker] pyvirtualcam started on {cam.device}", flush=True)
 
             while not STOP:

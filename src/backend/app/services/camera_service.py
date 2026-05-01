@@ -1,7 +1,9 @@
 from __future__ import annotations
 
+import platform
 import subprocess
 import sys
+import time
 from datetime import datetime
 from pathlib import Path
 from typing import List
@@ -9,6 +11,7 @@ from typing import List
 from fastapi import HTTPException
 from sqlalchemy.orm import Session
 
+from app.config import get_settings
 from app.models.camera import Camera
 from app.models.video import Video
 from app.schemas.camera_schema import CameraCreate
@@ -42,13 +45,15 @@ def create_camera(db: Session, payload: CameraCreate) -> Camera:
     if not video:
         raise HTTPException(status_code=400, detail="Video does not exist.")
 
-    if not device_service.device_exists(payload.device_path):
+    normalized_device = device_service.normalize_device_path(payload.device_path)
+
+    if not device_service.device_exists(normalized_device):
         raise HTTPException(
             status_code=400,
-            detail=f"Device '{payload.device_path}' not found. Load v4l2loopback first.",
+            detail=f"Device '{payload.device_path}' not found. On Linux, load v4l2loopback first.",
         )
 
-    if device_service.device_used_by_running_camera(db, payload.device_path):
+    if device_service.device_used_by_running_camera(db, normalized_device):
         raise HTTPException(
             status_code=400,
             detail=f"Device '{payload.device_path}' is already used by a running camera.",
@@ -57,7 +62,7 @@ def create_camera(db: Session, payload: CameraCreate) -> Camera:
     cam = Camera(
         name=payload.name,
         video_id=payload.video_id,
-        device_path=payload.device_path,
+        device_path=normalized_device,
         status="stopped",
         pid=None,
         fps=payload.fps,
@@ -81,10 +86,12 @@ def start_camera(db: Session, camera_id: str) -> Camera:
     if not video_path.exists():
         raise HTTPException(status_code=400, detail="Video file does not exist on disk.")
 
-    if not device_service.device_exists(cam.device_path):
+    normalized_device = device_service.normalize_device_path(cam.device_path)
+
+    if not device_service.device_exists(normalized_device):
         raise HTTPException(
             status_code=400,
-            detail=f"Device '{cam.device_path}' not found. Load v4l2loopback first.",
+            detail=f"Device '{cam.device_path}' not found. On Linux, load v4l2loopback first.",
         )
 
     if cam.status == "running" and cam.pid:
@@ -97,11 +104,15 @@ def start_camera(db: Session, camera_id: str) -> Camera:
         db.refresh(cam)
         raise HTTPException(status_code=400, detail="Camera was marked running but process is dead.")
 
-    if device_service.device_used_by_running_camera(db, cam.device_path):
+    if device_service.device_used_by_running_camera(db, normalized_device):
         raise HTTPException(
             status_code=400,
             detail=f"Device '{cam.device_path}' is already used by a running camera.",
         )
+
+    settings = get_settings()
+    settings.logs_dir.mkdir(parents=True, exist_ok=True)
+    log_path = settings.logs_dir / f"camera_{cam.id}.log"
 
     # Spawn worker from `src/backend`: `python -m app.workers.camera_worker ...`
     cmd = [
@@ -112,10 +123,11 @@ def start_camera(db: Session, camera_id: str) -> Camera:
         cam.id,
         "--video-path",
         str(video_path),
-        "--device-path",
-        cam.device_path,
         "--loop" if cam.loop else "--no-loop",
     ]
+    # Linux: explicit /dev/videoX. macOS/Windows: let pyvirtualcam pick platform backend (e.g. OBS).
+    if platform.system().lower() == "linux":
+        cmd += ["--device-path", normalized_device]
     if cam.fps:
         cmd += ["--fps", str(cam.fps)]
     if cam.width:
@@ -123,14 +135,31 @@ def start_camera(db: Session, camera_id: str) -> Camera:
     if cam.height:
         cmd += ["--height", str(cam.height)]
 
-    proc = subprocess.Popen(
-        cmd,
-        cwd=str(Path(__file__).resolve().parents[2]),  # `src/backend`
-        stdout=subprocess.PIPE,
-        stderr=subprocess.STDOUT,
-        text=True,
-        bufsize=1,
-    )
+    with log_path.open("a", encoding="utf-8") as log_file:
+        log_file.write(f"\n=== start {datetime.utcnow().isoformat()}Z ===\n")
+        log_file.write("CMD: " + " ".join(cmd) + "\n")
+        log_file.flush()
+
+        proc = subprocess.Popen(
+            cmd,
+            cwd=str(Path(__file__).resolve().parents[2]),  # `src/backend`
+            stdout=log_file,
+            stderr=subprocess.STDOUT,
+            text=True,
+        )
+
+        # Give the worker a moment to fail fast if pyvirtualcam can't initialize.
+        time.sleep(0.25)
+        if proc.poll() is not None:
+            cam.pid = None
+            cam.status = "failed"
+            db.add(cam)
+            db.commit()
+            db.refresh(cam)
+            raise HTTPException(
+                status_code=400,
+                detail=f"Worker failed to start. Check log: {log_path}",
+            )
 
     cam.pid = proc.pid
     cam.status = "running"

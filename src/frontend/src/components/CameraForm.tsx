@@ -79,7 +79,11 @@ export default function CameraForm({ videos, defaultVideoId, onCreated }: Props)
         </div>
         <div className="field">
           <label>Device path</label>
-          <input value={devicePath} onChange={(e) => setDevicePath(e.target.value)} placeholder="/dev/video10" />
+          <input
+            value={devicePath}
+            onChange={(e) => setDevicePath(e.target.value)}
+            placeholder={"/dev/video10 (Linux) or obs/auto (macOS/Windows)"}
+          />
         </div>
         <div className="grid" style={{ marginTop: 0 }}>
           <div className="field">
@@ -108,7 +112,9 @@ export default function CameraForm({ videos, defaultVideoId, onCreated }: Props)
           <button className="btn primary" disabled={busy || videos.length === 0} type="submit">
             {busy ? "Creating..." : "Create"}
           </button>
-          <span className="muted">Make sure `v4l2loopback` is loaded and the device exists.</span>
+          <span className="muted">
+            Linux: load <code>v4l2loopback</code>. macOS/Windows: use <code>obs</code> or <code>auto</code> with OBS Virtual Camera.
+          </span>
         </div>
       </form>
       {error && <div className="error" style={{ marginTop: 10 }}>{error}</div>}

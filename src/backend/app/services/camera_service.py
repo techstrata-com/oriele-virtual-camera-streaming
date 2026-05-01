@@ -18,6 +18,7 @@ from app.models.camera import Camera
 from app.models.video import Video
 from app.schemas.camera_schema import CameraCreate
 from app.services import device_service
+from app.services import rtsp_service
 from app.services.process_service import is_alive, stop_process
 
 
@@ -69,6 +70,9 @@ def create_camera(db: Session, payload: CameraCreate) -> Camera:
         device_path=normalized_device,
         status="stopped",
         pid=None,
+        rtsp_pid=None,
+        rtsp_url=None,
+        http_live_url=None,
         fps=payload.fps,
         width=payload.width,
         height=payload.height,
@@ -185,11 +189,68 @@ def start_camera(db: Session, camera_id: str) -> Camera:
     db.add(cam)
     db.commit()
     db.refresh(cam)
+
+    # Start RTSP sidecar FFmpeg process (must not break the primary worker).
+    cam.rtsp_pid = None
+    cam.rtsp_url = None
+    cam.http_live_url = None
+    if settings.rtsp_enabled:
+        try:
+            with log_path.open("a", encoding="utf-8") as log_file:
+                rtsp_proc, _push_url = rtsp_service.start_rtsp_process(
+                    camera_id=cam.id,
+                    video_path=video_path,
+                    device_path=normalized_device,
+                    loop=bool(cam.loop),
+                    fps=cam.fps,
+                    width=cam.width,
+                    height=cam.height,
+                    log_file=log_file,
+                )
+
+                time.sleep(0.25)
+                if rtsp_proc.poll() is not None:
+                    logger.error(
+                        "RTSP ffmpeg exited immediately camera_id=%s returncode=%s; keeping worker running. log=%s",
+                        cam.id,
+                        rtsp_proc.returncode,
+                        log_path,
+                    )
+                else:
+                    cam.rtsp_pid = rtsp_proc.pid
+                    cam.rtsp_url = rtsp_service.build_rtsp_public_url(cam.id)
+                    cam.http_live_url = rtsp_service.build_http_live_url(cam.id)
+        except Exception:
+            logger.exception("Failed to start RTSP for camera_id=%s; keeping worker running", cam.id)
+            cam.rtsp_pid = None
+            cam.rtsp_url = None
+            cam.http_live_url = None
+
+        db.add(cam)
+        db.commit()
+        db.refresh(cam)
+
     return cam
 
 
 def stop_camera(db: Session, camera_id: str) -> Camera:
     cam = get_camera(db, camera_id)
+
+    # Stop RTSP first (sidecar), then the main worker.
+    if cam.rtsp_pid:
+        rtsp_pid = cam.rtsp_pid
+        logger.info(
+            "Stop RTSP requested camera_id=%s rtsp_pid=%s os=%s",
+            cam.id,
+            rtsp_pid,
+            platform.system(),
+        )
+        try:
+            stop_process(rtsp_pid)
+        except Exception:
+            logger.exception("Failed to stop RTSP process camera_id=%s pid=%s", cam.id, rtsp_pid)
+        finally:
+            cam.rtsp_pid = None
 
     if cam.pid:
         pid = cam.pid
@@ -211,6 +272,8 @@ def stop_camera(db: Session, camera_id: str) -> Camera:
 
     cam.status = "stopped"
     cam.last_stopped_at = datetime.utcnow()
+    cam.rtsp_url = None
+    cam.http_live_url = None
     db.add(cam)
     db.commit()
     db.refresh(cam)
@@ -224,9 +287,10 @@ def restart_camera(db: Session, camera_id: str) -> Camera:
 
 def delete_camera(db: Session, camera_id: str) -> None:
     cam = get_camera(db, camera_id)
-    if cam.pid and cam.status == "running":
+    if cam.status == "running" or cam.pid or cam.rtsp_pid:
         stop_camera(db, camera_id)
         cam = get_camera(db, camera_id)
+
     db.delete(cam)
     db.commit()
 

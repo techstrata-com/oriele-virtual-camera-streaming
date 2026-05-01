@@ -45,3 +45,32 @@ def delete_camera(camera_id: str, db: Session = Depends(get_db)):
     camera_service.delete_camera(db, camera_id)
     return {"deleted": True}
 
+
+@router.get("/{camera_id}/stream-urls")
+def get_camera_stream_urls(camera_id: str, db: Session = Depends(get_db)):
+    cam = camera_service.get_camera(db, camera_id)
+
+    available = (
+        cam.status == "running"
+        and bool(getattr(cam, "rtsp_url", None))
+        and bool(getattr(cam, "http_live_url", None))
+    )
+
+    if not available:
+        return {
+            "camera_id": cam.id,
+            "status": cam.status,
+            "rtsp_url": None,
+            "http_live_url": None,
+            "available": False,
+            "message": "Camera is not running or live streams are not available.",
+        }
+
+    return {
+        "camera_id": cam.id,
+        "status": cam.status,
+        "rtsp_url": cam.rtsp_url,
+        "http_live_url": cam.http_live_url,
+        "available": True,
+    }
+

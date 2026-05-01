@@ -25,6 +25,9 @@ class CameraOut(BaseModel):
     device_path: str
     status: str
     pid: Optional[int] = None
+    rtsp_pid: Optional[int] = None
+    rtsp_url: Optional[str] = None
+    http_live_url: Optional[str] = None
     fps: Optional[float] = None
     width: Optional[int] = None
     height: Optional[int] = None

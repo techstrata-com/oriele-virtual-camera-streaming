@@ -23,6 +23,9 @@ class Camera(Base):
 
     status: Mapped[str] = mapped_column(String, nullable=False, default="stopped")
     pid: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
+    rtsp_pid: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
+    rtsp_url: Mapped[Optional[str]] = mapped_column(String, nullable=True)
+    http_live_url: Mapped[Optional[str]] = mapped_column(String, nullable=True)
 
     fps: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
     width: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)

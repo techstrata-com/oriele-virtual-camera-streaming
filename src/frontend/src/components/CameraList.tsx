@@ -1,4 +1,5 @@
 import { Link } from "react-router-dom";
+import { useState } from "react";
 import type { Camera } from "../types/camera";
 import { deleteCamera, restartCamera, startCamera, stopCamera } from "../api/cameras";
 
@@ -16,93 +17,190 @@ function statusClass(status: string): string {
 }
 
 export default function CameraList({ cameras, videoNameById, onChanged, onDeleted }: Props) {
+  const [busyId, setBusyId] = useState<string | null>(null);
+  const [busyAction, setBusyAction] = useState<string | null>(null);
+
+  async function runRowAction(id: string, action: string, fn: () => Promise<void>) {
+    setBusyId(id);
+    setBusyAction(action);
+    try {
+      await fn();
+    } finally {
+      setBusyId(null);
+      setBusyAction(null);
+    }
+  }
+
   async function onStart(id: string) {
-    const cam = await startCamera(id);
-    onChanged(cam);
+    await runRowAction(id, "start", async () => {
+      const cam = await startCamera(id);
+      onChanged(cam);
+    });
   }
   async function onStop(id: string) {
-    const cam = await stopCamera(id);
-    onChanged(cam);
+    await runRowAction(id, "stop", async () => {
+      const cam = await stopCamera(id);
+      onChanged(cam);
+    });
   }
   async function onRestart(id: string) {
-    const cam = await restartCamera(id);
-    onChanged(cam);
+    await runRowAction(id, "restart", async () => {
+      const cam = await restartCamera(id);
+      onChanged(cam);
+    });
   }
   async function onDelete(id: string) {
     if (!confirm("Delete this camera? If running, it will be stopped.")) return;
-    await deleteCamera(id);
-    onDeleted(id);
+    await runRowAction(id, "delete", async () => {
+      await deleteCamera(id);
+      onDeleted(id);
+    });
   }
   async function onCopy(text: string) {
     await navigator.clipboard.writeText(text);
   }
+  function onOpen(url: string) {
+    window.open(url, "_blank", "noopener,noreferrer");
+  }
 
   return (
-    <div className="panel">
+    <div className="panel cameras-panel">
       <h2>Cameras</h2>
-      <table className="table">
-        <thead>
-          <tr>
-            <th>Name</th>
-            <th>Video</th>
-            <th>Device</th>
-            <th>Status</th>
-            <th>PID</th>
-            <th>Actions</th>
-          </tr>
-        </thead>
-        <tbody>
-          {cameras.map((c) => (
-            <tr key={c.id}>
-              <td>
-                <div>
-                  <Link to={`/cameras/${c.id}`}>
+
+      <div className="camera-list">
+        {cameras.map((c) => {
+          const rowBusy = busyId === c.id;
+          return (
+            <div className="camera-row" key={c.id}>
+              <div className="camera-main">
+                <div className="camera-title">
+                  <Link to={`/cameras/${c.id}`} className="camera-name">
                     <b>{c.name}</b>
                   </Link>
+                  <span className={statusClass(c.status)}>{c.status}</span>
                 </div>
-                <div className="muted" style={{ fontSize: 12 }}>
-                  {c.width && c.height ? `${c.width}x${c.height}` : "—"}{" "}
-                  {c.fps ? `@ ${c.fps.toFixed(2)} fps` : ""}
+
+                <div className="camera-sub muted">
+                  <span className="camera-sub-item">
+                    <span className="camera-sub-label">Video</span> {videoNameById[c.video_id] ?? c.video_id}
+                  </span>
+                  <span className="camera-sub-item">
+                    <span className="camera-sub-label">PID</span> {c.pid ?? "—"}
+                  </span>
                 </div>
-              </td>
-              <td className="muted">{videoNameById[c.video_id] ?? c.video_id}</td>
-              <td>
-                <code>{c.device_path}</code>{" "}
-                <button className="btn" onClick={() => onCopy(c.device_path)}>
-                  Copy
+
+                <div className="camera-meta">
+                  <div className="camera-meta-item">
+                    <span className="camera-meta-label">Device</span>
+                    <code className="mono">{c.device_path}</code>
+                    <button className="btn sm" onClick={() => onCopy(c.device_path)} disabled={rowBusy}>
+                      Copy
+                    </button>
+                  </div>
+
+                  <div className="camera-meta-item muted">
+                    <span className="camera-meta-label">Output</span>
+                    {c.width && c.height ? `${c.width}×${c.height}` : "—"}{" "}
+                    {c.fps ? `@ ${c.fps.toFixed(2)} fps` : ""}
+                  </div>
+                </div>
+              </div>
+
+              <div className="camera-streams">
+                <div className="stream-block">
+                  <div className="stream-header">
+                    <span className="stream-label">RTSP</span>
+                    {c.status === "running" && c.rtsp_url ? (
+                      <span className="stream-pill ok">ready</span>
+                    ) : (
+                      <span className="stream-pill">—</span>
+                    )}
+                  </div>
+                  {c.status === "running" && c.rtsp_url ? (
+                    <>
+                      <code className="stream-url" title={c.rtsp_url}>
+                        {c.rtsp_url}
+                      </code>
+                      <div className="stream-actions">
+                        <button className="btn sm" onClick={() => onCopy(c.rtsp_url!)} disabled={rowBusy}>
+                          Copy
+                        </button>
+                      </div>
+                    </>
+                  ) : (
+                    <div className="muted stream-empty">Not available</div>
+                  )}
+                </div>
+
+                <div className="stream-block">
+                  <div className="stream-header">
+                    <span className="stream-label">HTTP Live</span>
+                    {c.status === "running" && c.http_live_url ? (
+                      <span className="stream-pill ok">ready</span>
+                    ) : (
+                      <span className="stream-pill">—</span>
+                    )}
+                  </div>
+                  {c.status === "running" && c.http_live_url ? (
+                    <>
+                      <code className="stream-url" title={c.http_live_url}>
+                        {c.http_live_url}
+                      </code>
+                      <div className="stream-actions">
+                        <button className="btn sm" onClick={() => onCopy(c.http_live_url!)} disabled={rowBusy}>
+                          Copy
+                        </button>
+                        <button className="btn sm" onClick={() => onOpen(c.http_live_url!)} disabled={rowBusy}>
+                          Open
+                        </button>
+                      </div>
+                    </>
+                  ) : (
+                    <div className="muted stream-empty">Not available</div>
+                  )}
+                </div>
+              </div>
+
+              <div className="camera-actions actions-group">
+                <button
+                  className="btn primary sm"
+                  onClick={() => onStart(c.id)}
+                  disabled={rowBusy || c.status === "running"}
+                  title="Start camera"
+                >
+                  {rowBusy && busyAction === "start" ? "Starting…" : "Start"}
                 </button>
-              </td>
-              <td>
-                <span className={statusClass(c.status)}>{c.status}</span>
-              </td>
-              <td className="muted">{c.pid ?? "—"}</td>
-              <td>
-                <div className="row">
-                  <button className="btn primary" onClick={() => onStart(c.id)} disabled={c.status === "running"}>
-                    Start
-                  </button>
-                  <button className="btn" onClick={() => onStop(c.id)} disabled={c.status !== "running"}>
-                    Stop
-                  </button>
-                  <button className="btn" onClick={() => onRestart(c.id)}>
-                    Restart
-                  </button>
-                  <button className="btn danger" onClick={() => onDelete(c.id)}>
-                    Delete
-                  </button>
-                </div>
-              </td>
-            </tr>
-          ))}
-          {cameras.length === 0 && (
-            <tr>
-              <td colSpan={6} className="muted" style={{ padding: 14 }}>
-                No cameras created yet.
-              </td>
-            </tr>
-          )}
-        </tbody>
-      </table>
+                <button
+                  className="btn sm"
+                  onClick={() => onStop(c.id)}
+                  disabled={rowBusy || c.status !== "running"}
+                  title="Stop camera"
+                >
+                  {rowBusy && busyAction === "stop" ? "Stopping…" : "Stop"}
+                </button>
+                <button
+                  className="btn sm"
+                  onClick={() => onRestart(c.id)}
+                  disabled={rowBusy}
+                  title="Restart camera"
+                >
+                  {rowBusy && busyAction === "restart" ? "Restarting…" : "Restart"}
+                </button>
+                <button
+                  className="btn danger sm"
+                  onClick={() => onDelete(c.id)}
+                  disabled={rowBusy}
+                  title="Delete camera"
+                >
+                  {rowBusy && busyAction === "delete" ? "Deleting…" : "Delete"}
+                </button>
+              </div>
+            </div>
+          );
+        })}
+
+        {cameras.length === 0 && <div className="muted" style={{ padding: 10 }}>No cameras created yet.</div>}
+      </div>
     </div>
   );
 }

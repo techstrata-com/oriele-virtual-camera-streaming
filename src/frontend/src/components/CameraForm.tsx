@@ -113,7 +113,7 @@ export default function CameraForm({ videos, defaultVideoId, onCreated }: Props)
             {busy ? "Creating..." : "Create"}
           </button>
           <span className="muted">
-            Linux: load <code>v4l2loopback</code>. macOS/Windows: use <code>obs</code> or <code>auto</code> with OBS Virtual Camera.
+            Linux: load <code>v4l2loopback</code> and use a unique <code>/dev/videoX</code>. macOS/Windows: use <code>obs</code> or <code>auto</code> with OBS Virtual Camera. Stream URLs appear after Start.
           </span>
         </div>
       </form>

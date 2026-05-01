@@ -31,7 +31,7 @@ export default function VideosPage() {
 
   return (
     <div className="container">
-      <div className="grid">
+      <div className="grid page-grid">
         <VideoUpload
           onUploaded={(v) => {
             setVideos((prev) => [v, ...prev]);
@@ -49,7 +49,7 @@ export default function VideosPage() {
       {error && <div className="error" style={{ marginTop: 16 }}>{error}</div>}
       {loading && <div className="muted" style={{ marginTop: 16 }}>Loading…</div>}
 
-      <div style={{ marginTop: 16 }}>
+      <div className="section-gap">
         <VideoList
           videos={videos}
           onDeleted={(id) => setVideos((prev) => prev.filter((v) => v.id !== id))}

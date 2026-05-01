@@ -29,7 +29,8 @@ export default function VideoList({ videos, onDeleted, onCreateCamera }: Props) 
   return (
     <div className="panel">
       <h2>Videos</h2>
-      <table className="table">
+      <div className="table-wrap">
+        <table className="table">
         <thead>
           <tr>
             <th>Thumbnail</th>
@@ -86,7 +87,8 @@ export default function VideoList({ videos, onDeleted, onCreateCamera }: Props) 
             </tr>
           )}
         </tbody>
-      </table>
+        </table>
+      </div>
     </div>
   );
 }

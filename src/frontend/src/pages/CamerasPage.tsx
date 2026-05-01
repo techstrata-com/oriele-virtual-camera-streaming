@@ -34,12 +34,12 @@ export default function CamerasPage() {
 
   return (
     <div className="container">
-      <div className="grid">
+      <div className="grid page-grid">
         <CameraForm
           videos={videos}
           onCreated={(cam) => setCameras((prev) => [cam, ...prev])}
         />
-        <div className="panel">
+        <div className="panel tips-panel">
           <h2>Tips</h2>
           <div className="muted">
             - Load devices via <code>scripts/load_virtual_cameras.sh</code>
@@ -58,7 +58,7 @@ export default function CamerasPage() {
 
       {error && <div className="error" style={{ marginTop: 16 }}>{error}</div>}
 
-      <div style={{ marginTop: 16 }}>
+      <div className="section-gap">
         <CameraList
           cameras={cameras}
           videoNameById={videoNameById}

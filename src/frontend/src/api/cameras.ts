@@ -1,5 +1,5 @@
 import { api } from "./client";
-import type { Camera, CameraCreate } from "../types/camera";
+import type { Camera, CameraCreate, CameraStreamUrls } from "../types/camera";
 
 export async function createCamera(payload: CameraCreate): Promise<Camera> {
   const res = await api.post<Camera>("/api/cameras", payload);
@@ -33,5 +33,10 @@ export async function restartCamera(cameraId: string): Promise<Camera> {
 
 export async function deleteCamera(cameraId: string): Promise<void> {
   await api.delete(`/api/cameras/${cameraId}`);
+}
+
+export async function getCameraStreamUrls(cameraId: string): Promise<CameraStreamUrls> {
+  const res = await api.get<CameraStreamUrls>(`/api/cameras/${cameraId}/stream-urls`);
+  return res.data;
 }
 

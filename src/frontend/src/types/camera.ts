@@ -13,6 +13,9 @@ export type Camera = {
   device_path: string;
   status: CameraStatus;
   pid?: number | null;
+  rtsp_pid?: number | null;
+  rtsp_url?: string | null;
+  http_live_url?: string | null;
   fps?: number | null;
   width?: number | null;
   height?: number | null;
@@ -21,6 +24,15 @@ export type Camera = {
   updated_at: string;
   last_started_at?: string | null;
   last_stopped_at?: string | null;
+};
+
+export type CameraStreamUrls = {
+  camera_id: string;
+  status: CameraStatus;
+  rtsp_url: string | null;
+  http_live_url: string | null;
+  available: boolean;
+  message?: string;
 };
 
 export type CameraCreate = {

@@ -16,3 +16,6 @@ data/thumbnails/
 data/logs/
 
 .env
+
+.vs
+data

@@ -84,6 +84,70 @@ while True:
 
 ## Notes
 
-- No RTSP/WebRTC/FFmpeg streaming in this MVP.
+- No RTSP/WebRTC in this MVP.
 - The backend spawns worker processes using `subprocess.Popen`.
+
+## RTSP and HTTP live streaming
+
+When a camera is **running**, the backend can provide:
+
+- **RTSP**: `rtsp://localhost:8554/{camera_id}` (via an external RTSP server)
+- **HTTP live (MJPEG)**: `http://localhost:8000/live/{camera_id}`
+
+### Requirements
+
+- **FFmpeg** installed and available in `PATH` (or set `FFMPEG_BINARY`)
+- **MediaMTX** (RTSP server) running (recommended)
+- Linux virtual camera still requires **`v4l2loopback`**
+
+### Run MediaMTX
+
+- Download MediaMTX and run it (defaults to RTSP port `8554`):
+  - `./mediamtx`
+
+### Local test
+
+1. Start MediaMTX.
+2. Start backend:
+
+```bash
+uvicorn app.main:app --host 127.0.0.1 --port 8000
+```
+
+3. Start frontend:
+
+```bash
+npm run dev
+```
+
+4. Upload video.
+5. Create camera.
+6. Start camera.
+7. Copy RTSP URL from the Cameras table and open it in VLC:
+   - Media -> Open Network Stream -> `rtsp://localhost:8554/{camera_id}`
+8. Open HTTP live in a browser:
+   - `http://localhost:8000/live/{camera_id}`
+
+### External/server test
+
+1. Run backend:
+
+```bash
+uvicorn app.main:app --host 0.0.0.0 --port 8000
+```
+
+2. Run MediaMTX on the server.
+3. Open ports:
+   - `8000` for HTTP/API
+   - `8554` for RTSP
+4. Set env:
+
+```bash
+RTSP_PUBLIC_BASE_URL=rtsp://SERVER_IP:8554
+HTTP_LIVE_PUBLIC_BASE_URL=http://SERVER_IP:8000
+```
+
+5. URLs become:
+   - `rtsp://SERVER_IP:8554/{camera_id}`
+   - `http://SERVER_IP:8000/live/{camera_id}`
 

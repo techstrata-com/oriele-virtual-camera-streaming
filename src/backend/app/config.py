@@ -32,6 +32,7 @@ def _env_int(name: str, default: int) -> int:
 class Settings(BaseModel):
     project_root: Path
     data_dir: Path
+    controls_dir: Path
     videos_dir: Path
     thumbnails_dir: Path
     logs_dir: Path
@@ -58,11 +59,14 @@ def get_settings() -> Settings:
     project_root = Path(__file__).resolve().parents[3]
     data_dir = project_root / "data"
     data_dir.mkdir(parents=True, exist_ok=True)
+    controls_dir = data_dir / "controls"
+    controls_dir.mkdir(parents=True, exist_ok=True)
     logs_dir = data_dir / "logs"
     logs_dir.mkdir(parents=True, exist_ok=True)
     return Settings(
         project_root=project_root,
         data_dir=data_dir,
+        controls_dir=controls_dir,
         videos_dir=data_dir / "videos",
         thumbnails_dir=data_dir / "thumbnails",
         logs_dir=logs_dir,

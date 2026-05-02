@@ -12,6 +12,7 @@ from sqlalchemy.orm import Session
 from app.db.session import get_db
 from app.models.video import Video
 from app.services import camera_service
+from app.services import camera_control_service
 
 
 router = APIRouter(tags=["live"])
@@ -19,6 +20,7 @@ router = APIRouter(tags=["live"])
 
 def _mjpeg_frames(
     *,
+    camera_id: str,
     video_path: Path,
     loop: bool,
     fps: Optional[float],
@@ -36,7 +38,26 @@ def _mjpeg_frames(
             out_fps = 10.0
         delay_s = 1.0 / out_fps
 
+        last_jpg: Optional[bytes] = None
         while True:
+            if camera_control_service.is_paused(camera_id):
+                # Do not advance the capture while paused. Repeat last frame.
+                if last_jpg is None:
+                    ok, frame = cap.read()
+                    if ok and frame is not None:
+                        if width and height and (frame.shape[1] != width or frame.shape[0] != height):
+                            frame = cv2.resize(frame, (int(width), int(height)), interpolation=cv2.INTER_AREA)
+                        ok_jpg, buf = cv2.imencode(".jpg", frame, [int(cv2.IMWRITE_JPEG_QUALITY), 80])
+                        if ok_jpg:
+                            last_jpg = buf.tobytes()
+                if last_jpg is not None:
+                    yield (
+                        b"--frame\r\n"
+                        b"Content-Type: image/jpeg\r\n\r\n" + last_jpg + b"\r\n"
+                    )
+                time.sleep(delay_s)
+                continue
+
             ok, frame = cap.read()
             if not ok or frame is None:
                 if loop:
@@ -52,6 +73,7 @@ def _mjpeg_frames(
                 continue
 
             jpg = buf.tobytes()
+            last_jpg = jpg
             yield (
                 b"--frame\r\n"
                 b"Content-Type: image/jpeg\r\n\r\n" + jpg + b"\r\n"
@@ -64,7 +86,7 @@ def _mjpeg_frames(
 @router.get("/live/{camera_id}")
 def live_mjpeg(camera_id: str, db: Session = Depends(get_db)):
     cam = camera_service.get_camera(db, camera_id)
-    if cam.status != "running" or not cam.pid:
+    if cam.status not in {"running", "paused"} or not cam.pid:
         raise HTTPException(status_code=409, detail="Camera is not running.")
 
     video = db.query(Video).filter(Video.id == cam.video_id).first()
@@ -77,6 +99,7 @@ def live_mjpeg(camera_id: str, db: Session = Depends(get_db)):
 
     return StreamingResponse(
         _mjpeg_frames(
+            camera_id=cam.id,
             video_path=video_path,
             loop=bool(cam.loop),
             fps=cam.fps,

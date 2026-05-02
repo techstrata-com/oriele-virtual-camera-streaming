@@ -27,6 +27,7 @@ class WorkerArgs:
     camera_id: str
     video_path: Path
     device_path: Optional[str]
+    control_dir: Optional[Path]
     fps: Optional[float]
     width: Optional[int]
     height: Optional[int]
@@ -39,6 +40,7 @@ def parse_args(argv: list[str]) -> WorkerArgs:
     parser.add_argument("--video-path", required=True)
     # Linux: use /dev/videoX. macOS/Windows: omit to use default backend (e.g., OBS Virtual Camera).
     parser.add_argument("--device-path", required=False, default=None)
+    parser.add_argument("--control-dir", required=False, default=None)
     parser.add_argument("--fps", type=float, default=None)
     parser.add_argument("--width", type=int, default=None)
     parser.add_argument("--height", type=int, default=None)
@@ -53,6 +55,7 @@ def parse_args(argv: list[str]) -> WorkerArgs:
         camera_id=ns.camera_id,
         video_path=Path(ns.video_path),
         device_path=(ns.device_path.strip() if isinstance(ns.device_path, str) and ns.device_path.strip() else None),
+        control_dir=(Path(ns.control_dir) if isinstance(ns.control_dir, str) and ns.control_dir.strip() else None),
         fps=ns.fps,
         width=ns.width,
         height=ns.height,
@@ -65,6 +68,7 @@ def main(argv: list[str]) -> int:
     print(f"[worker] camera_id={args.camera_id}", flush=True)
     print(f"[worker] video_path={args.video_path}", flush=True)
     print(f"[worker] device_path={args.device_path or '(auto)'}", flush=True)
+    print(f"[worker] control_dir={args.control_dir or '(none)'}", flush=True)
     print(f"[worker] fps={args.fps} width={args.width} height={args.height} loop={args.loop}", flush=True)
 
     if not args.video_path.exists():
@@ -100,7 +104,37 @@ def main(argv: list[str]) -> int:
         with pyvirtualcam.Camera(**cam_kwargs) as cam:
             print(f"[worker] pyvirtualcam started on {cam.device}", flush=True)
 
+            pause_flag: Optional[Path] = None
+            if args.control_dir:
+                try:
+                    args.control_dir.mkdir(parents=True, exist_ok=True)
+                    pause_flag = args.control_dir / "pause.flag"
+                except Exception:
+                    pause_flag = None
+
+            last_frame = None
             while not STOP:
+                paused = False
+                if pause_flag is not None:
+                    try:
+                        paused = pause_flag.exists()
+                    except Exception:
+                        paused = False
+
+                if paused:
+                    # Do NOT advance video while paused. Repeat last frame.
+                    if last_frame is None:
+                        ok, frame = cap.read()
+                        if ok and frame is not None:
+                            last_frame = frame
+                    if last_frame is not None:
+                        frame = last_frame
+                        if frame.shape[1] != out_w or frame.shape[0] != out_h:
+                            frame = cv2.resize(frame, (out_w, out_h), interpolation=cv2.INTER_AREA)
+                        cam.send(frame)
+                    cam.sleep_until_next_frame()
+                    continue
+
                 ok, frame = cap.read()
                 if not ok or frame is None:
                     if args.loop:
@@ -112,6 +146,7 @@ def main(argv: list[str]) -> int:
                 if frame.shape[1] != out_w or frame.shape[0] != out_h:
                     frame = cv2.resize(frame, (out_w, out_h), interpolation=cv2.INTER_AREA)
 
+                last_frame = frame
                 cam.send(frame)
                 cam.sleep_until_next_frame()
 

@@ -40,6 +40,16 @@ def restart_camera(camera_id: str, db: Session = Depends(get_db)):
     return camera_service.restart_camera(db, camera_id)
 
 
+@router.post("/{camera_id}/pause", response_model=CameraOut)
+def pause_camera(camera_id: str, db: Session = Depends(get_db)):
+    return camera_service.pause_camera(db, camera_id)
+
+
+@router.post("/{camera_id}/resume", response_model=CameraOut)
+def resume_camera(camera_id: str, db: Session = Depends(get_db)):
+    return camera_service.resume_camera(db, camera_id)
+
+
 @router.delete("/{camera_id}")
 def delete_camera(camera_id: str, db: Session = Depends(get_db)):
     camera_service.delete_camera(db, camera_id)

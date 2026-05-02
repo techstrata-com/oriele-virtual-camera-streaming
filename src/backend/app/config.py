@@ -43,6 +43,11 @@ class Settings(BaseModel):
     rtsp_public_base_url: str
     http_live_public_base_url: str
     ffmpeg_binary: str
+    virtual_camera_start_nr: int
+    virtual_camera_end_nr: int
+    virtual_camera_dynamic_create: bool
+    v4l2loopback_ctl_binary: str
+    v4l2loopback_use_sudo: bool
 
 
 @lru_cache(maxsize=1)
@@ -69,5 +74,11 @@ def get_settings() -> Settings:
         rtsp_public_base_url=os.getenv("RTSP_PUBLIC_BASE_URL", "").strip(),
         http_live_public_base_url=os.getenv("HTTP_LIVE_PUBLIC_BASE_URL", "").strip(),
         ffmpeg_binary=os.getenv("FFMPEG_BINARY", "ffmpeg").strip() or "ffmpeg",
+        virtual_camera_start_nr=_env_int("VIRTUAL_CAMERA_START_NR", 10),
+        virtual_camera_end_nr=_env_int("VIRTUAL_CAMERA_END_NR", 99),
+        virtual_camera_dynamic_create=_env_bool("VIRTUAL_CAMERA_DYNAMIC_CREATE", True),
+        v4l2loopback_ctl_binary=os.getenv("V4L2LOOPBACK_CTL_BINARY", "v4l2loopback-ctl").strip()
+        or "v4l2loopback-ctl",
+        v4l2loopback_use_sudo=_env_bool("V4L2LOOPBACK_USE_SUDO", False),
     )
 

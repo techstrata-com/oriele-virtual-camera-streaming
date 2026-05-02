@@ -2,6 +2,7 @@ import { useEffect, useMemo, useState } from "react";
 import type { Video } from "../types/video";
 import type { Camera, CameraCreate } from "../types/camera";
 import { createCamera } from "../api/cameras";
+import { getOrCreateClientId } from "../utils/clientId";
 
 type Props = {
   videos: Video[];
@@ -10,10 +11,12 @@ type Props = {
 };
 
 export default function CameraForm({ videos, defaultVideoId, onCreated }: Props) {
+  const clientId = useMemo(() => getOrCreateClientId(), []);
   const defaultId = useMemo(() => defaultVideoId ?? videos[0]?.id ?? "", [defaultVideoId, videos]);
   const [name, setName] = useState("");
   const [videoId, setVideoId] = useState(defaultId);
-  const [devicePath, setDevicePath] = useState("/dev/video10");
+  const [showAdvanced, setShowAdvanced] = useState(false);
+  const [devicePath, setDevicePath] = useState("");
   const [fps, setFps] = useState<string>("30");
   const [width, setWidth] = useState<string>("1280");
   const [height, setHeight] = useState<string>("720");
@@ -41,17 +44,21 @@ export default function CameraForm({ videos, defaultVideoId, onCreated }: Props)
     setBusy(true);
     try {
       const payload: CameraCreate = {
+        client_id: clientId,
         name: name.trim(),
         video_id: videoId,
-        device_path: devicePath.trim(),
         fps: fps ? Number(fps) : null,
         width: width ? Number(width) : null,
         height: height ? Number(height) : null,
         loop,
       };
+      const adv = devicePath.trim();
+      if (showAdvanced && adv) {
+        payload.device_path = adv;
+      }
       const cam = await createCamera(payload);
       onCreated(cam);
-      setSuccess("Camera created.");
+      setSuccess("Camera ready.");
     } catch (err: any) {
       setError(err?.response?.data?.detail ?? "Failed to create camera.");
     } finally {
@@ -63,6 +70,15 @@ export default function CameraForm({ videos, defaultVideoId, onCreated }: Props)
     <div className="panel">
       <h2>Create camera</h2>
       <form onSubmit={onSubmit}>
+        <div className="field">
+          <label>Client ID</label>
+          <div className="muted" style={{ fontSize: 13, wordBreak: "break-all" }}>
+            <code>{clientId}</code>
+          </div>
+          <div className="muted" style={{ marginTop: 4, fontSize: 12 }}>
+            Used so the server can reuse the same virtual camera when you create again for the same video.
+          </div>
+        </div>
         <div className="field">
           <label>Video</label>
           <select value={videoId} onChange={(e) => setVideoId(e.target.value)}>
@@ -78,12 +94,26 @@ export default function CameraForm({ videos, defaultVideoId, onCreated }: Props)
           <input value={name} onChange={(e) => setName(e.target.value)} placeholder="Entry Gate Camera" />
         </div>
         <div className="field">
-          <label>Device path</label>
-          <input
-            value={devicePath}
-            onChange={(e) => setDevicePath(e.target.value)}
-            placeholder={"/dev/video10 (Linux) or obs/auto (macOS/Windows)"}
-          />
+          <label>
+            <button
+              type="button"
+              className="btn sm"
+              style={{ marginRight: 8 }}
+              onClick={() => setShowAdvanced(!showAdvanced)}
+            >
+              {showAdvanced ? "Hide" : "Advanced"}: device path
+            </button>
+            <span className="muted" style={{ fontSize: 13 }}>
+              Linux: leave unset to auto-assign <code>/dev/videoX</code>
+            </span>
+          </label>
+          {showAdvanced && (
+            <input
+              value={devicePath}
+              onChange={(e) => setDevicePath(e.target.value)}
+              placeholder="/dev/video10 (optional)"
+            />
+          )}
         </div>
         <div className="grid" style={{ marginTop: 0 }}>
           <div className="field">
@@ -113,7 +143,8 @@ export default function CameraForm({ videos, defaultVideoId, onCreated }: Props)
             {busy ? "Creating..." : "Create"}
           </button>
           <span className="muted">
-            Linux: load <code>v4l2loopback</code> and use a unique <code>/dev/videoX</code>. macOS/Windows: use <code>obs</code> or <code>auto</code> with OBS Virtual Camera. Stream URLs appear after Start.
+            On Linux the backend picks a free <code>/dev/video</code> device and labels it with your client id and video name.
+            macOS/Windows: optional advanced path or defaults for OBS. Stream URLs appear after Start.
           </span>
         </div>
       </form>
@@ -122,4 +153,3 @@ export default function CameraForm({ videos, defaultVideoId, onCreated }: Props)
     </div>
   );
 }
-

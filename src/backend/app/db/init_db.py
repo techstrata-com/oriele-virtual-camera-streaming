@@ -37,3 +37,18 @@ def init_db() -> None:
             conn.execute(text("ALTER TABLE cameras ADD COLUMN http_live_url VARCHAR"))
             logger.info("SQLite migration: added cameras.http_live_url")
 
+        if "client_id" not in existing_cols:
+            conn.execute(text("ALTER TABLE cameras ADD COLUMN client_id VARCHAR DEFAULT 'legacy'"))
+            logger.info("SQLite migration: added cameras.client_id")
+
+        if "device_label" not in existing_cols:
+            conn.execute(text("ALTER TABLE cameras ADD COLUMN device_label VARCHAR"))
+            logger.info("SQLite migration: added cameras.device_label")
+
+        conn.execute(
+            text(
+                "UPDATE cameras SET client_id = 'legacy' "
+                "WHERE client_id IS NULL OR trim(client_id) = ''"
+            )
+        )
+

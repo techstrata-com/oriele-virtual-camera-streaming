@@ -92,7 +92,15 @@ export default function CameraDetailPage() {
           <div style={{ marginTop: 12 }} className="grid">
             <div className="panel">
               <h2>Camera details</h2>
-              <div className="muted">Device: <code>{camera.device_path}</code></div>
+              <div className="muted">
+                Client: <code>{camera.client_id ?? "—"}</code>
+              </div>
+              <div className="muted" style={{ marginTop: 6 }}>
+                Device label: {camera.device_label ?? "—"}
+              </div>
+              <div className="muted" style={{ marginTop: 6 }}>
+                Device path: <code>{camera.device_path}</code>
+              </div>
               <div className="muted">PID: {camera.pid ?? "—"}</div>
               <div className="muted">FPS: {camera.fps ?? "—"}</div>
               <div className="muted">

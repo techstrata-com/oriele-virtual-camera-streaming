@@ -11,6 +11,7 @@ from pathlib import Path
 from typing import List
 
 from fastapi import HTTPException
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
 from app.config import get_settings
@@ -19,6 +20,7 @@ from app.models.video import Video
 from app.schemas.camera_schema import CameraCreate
 from app.services import device_service
 from app.services import rtsp_service
+from app.services import virtual_camera_service
 from app.services.process_service import is_alive, stop_process
 
 
@@ -50,24 +52,61 @@ def create_camera(db: Session, payload: CameraCreate) -> Camera:
     if not video:
         raise HTTPException(status_code=400, detail="Video does not exist.")
 
-    normalized_device = device_service.normalize_device_path(payload.device_path)
+    client_id = payload.client_id.strip()
 
-    if not device_service.device_exists(normalized_device):
-        raise HTTPException(
-            status_code=400,
-            detail=f"Device '{payload.device_path}' not found. On Linux, load v4l2loopback first.",
-        )
+    existing = (
+        db.query(Camera)
+        .filter(Camera.client_id == client_id, Camera.video_id == payload.video_id)
+        .first()
+    )
+    if existing:
+        return existing
 
-    if device_service.device_used_by_running_camera(db, normalized_device):
-        raise HTTPException(
-            status_code=400,
-            detail=f"Device '{payload.device_path}' is already used by a running camera.",
-        )
+    device_path: str
+    device_label: str | None
+
+    if device_service.is_linux():
+        try:
+            device_path, device_label = virtual_camera_service.get_or_create_virtual_camera_device(
+                db=db,
+                client_id=client_id,
+                video_id=payload.video_id,
+                video_name=video.name,
+                requested_device_path=payload.device_path,
+            )
+        except virtual_camera_service.VirtualCameraError as e:
+            raise HTTPException(status_code=400, detail=str(e)) from e
+
+        if device_service.device_used_by_any_camera(db, device_path):
+            raise HTTPException(
+                status_code=400,
+                detail=f"Device '{device_path}' is already assigned to another camera.",
+            )
+
+        if not device_service.device_exists(device_path):
+            raise HTTPException(
+                status_code=400,
+                detail=f"Device '{device_path}' not found. On Linux, load v4l2loopback first.",
+            )
+    else:
+        raw = payload.device_path
+        if raw is None or not str(raw).strip():
+            raw = "obs"
+        device_path = device_service.normalize_device_path(str(raw))
+        device_label = None
+
+        if not device_service.device_exists(device_path):
+            raise HTTPException(
+                status_code=400,
+                detail="Invalid or unsupported device_path for this platform.",
+            )
 
     cam = Camera(
         name=payload.name,
+        client_id=client_id,
         video_id=payload.video_id,
-        device_path=normalized_device,
+        device_path=device_path,
+        device_label=device_label,
         status="stopped",
         pid=None,
         rtsp_pid=None,
@@ -79,7 +118,18 @@ def create_camera(db: Session, payload: CameraCreate) -> Camera:
         loop=payload.loop,
     )
     db.add(cam)
-    db.commit()
+    try:
+        db.commit()
+    except IntegrityError:
+        db.rollback()
+        dup = (
+            db.query(Camera)
+            .filter(Camera.client_id == client_id, Camera.video_id == payload.video_id)
+            .first()
+        )
+        if dup:
+            return dup
+        raise
     db.refresh(cam)
     return cam
 

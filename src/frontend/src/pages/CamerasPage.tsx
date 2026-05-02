@@ -37,14 +37,19 @@ export default function CamerasPage() {
       <div className="grid page-grid">
         <CameraForm
           videos={videos}
-          onCreated={(cam) => setCameras((prev) => [cam, ...prev])}
+          onCreated={(cam) =>
+            setCameras((prev) => {
+              const rest = prev.filter((c) => c.id !== cam.id);
+              return [cam, ...rest];
+            })
+          }
         />
         <div className="panel tips-panel">
           <h2>Tips</h2>
           <div className="muted">
-            - Load devices via <code>scripts/load_virtual_cameras.sh</code>
+            - Linux: install <code>v4l2loopback</code> (and tools for dynamic device creation, optional)
             <br />
-            - Use unique <code>/dev/videoX</code> per running camera
+            - The backend assigns a free <code>/dev/videoX</code> per client + video
             <br />
             - If a camera shows running but PID is dead, try restart
           </div>

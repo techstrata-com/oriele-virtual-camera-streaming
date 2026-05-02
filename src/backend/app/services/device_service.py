@@ -52,3 +52,12 @@ def device_used_by_running_camera(db: Session, device_path: str) -> bool:
     )
     return db.query(q.exists()).scalar() is True
 
+
+def device_used_by_any_camera(db: Session, device_path: str) -> bool:
+    """True if any camera row already owns this device path (stopped or running). Linux only."""
+    if not is_linux():
+        return False
+    dp = normalize_device_path(device_path)
+    q = db.query(Camera).filter(Camera.device_path == dp)
+    return db.query(q.exists()).scalar() is True
+

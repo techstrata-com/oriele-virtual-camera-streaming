@@ -85,6 +85,9 @@ export default function CameraList({ cameras, videoNameById, onChanged, onDelete
                     <span className="camera-sub-label">Video</span> {videoNameById[c.video_id] ?? c.video_id}
                   </span>
                   <span className="camera-sub-item">
+                    <span className="camera-sub-label">Client</span> {c.client_id ?? "—"}
+                  </span>
+                  <span className="camera-sub-item">
                     <span className="camera-sub-label">PID</span> {c.pid ?? "—"}
                   </span>
                 </div>
@@ -92,9 +95,18 @@ export default function CameraList({ cameras, videoNameById, onChanged, onDelete
                 <div className="camera-meta">
                   <div className="camera-meta-item">
                     <span className="camera-meta-label">Device</span>
-                    <code className="mono">{c.device_path}</code>
+                    <span className="mono" style={{ wordBreak: "break-all" }}>
+                      {c.device_label ? (
+                        <>
+                          {c.device_label}{" "}
+                          <span className="muted">({c.device_path})</span>
+                        </>
+                      ) : (
+                        <code>{c.device_path}</code>
+                      )}
+                    </span>
                     <button className="btn sm" onClick={() => onCopy(c.device_path)} disabled={rowBusy}>
-                      Copy
+                      Copy path
                     </button>
                   </div>
 

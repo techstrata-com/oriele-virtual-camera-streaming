@@ -9,8 +9,10 @@ export type CameraStatus =
 export type Camera = {
   id: string;
   name: string;
+  client_id: string;
   video_id: string;
   device_path: string;
+  device_label?: string | null;
   status: CameraStatus;
   pid?: number | null;
   rtsp_pid?: number | null;
@@ -36,12 +38,12 @@ export type CameraStreamUrls = {
 };
 
 export type CameraCreate = {
+  client_id: string;
   name: string;
   video_id: string;
-  device_path: string;
+  device_path?: string | null;
   fps?: number | null;
   width?: number | null;
   height?: number | null;
   loop: boolean;
 };
-

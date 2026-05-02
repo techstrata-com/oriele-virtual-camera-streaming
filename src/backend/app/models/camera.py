@@ -4,7 +4,7 @@ from datetime import datetime
 from typing import Optional
 from uuid import uuid4
 
-from sqlalchemy import Boolean, DateTime, Float, ForeignKey, Integer, String
+from sqlalchemy import Boolean, DateTime, Float, ForeignKey, Integer, String, UniqueConstraint
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from app.models.base import Base
@@ -12,14 +12,17 @@ from app.models.base import Base
 
 class Camera(Base):
     __tablename__ = "cameras"
+    __table_args__ = (UniqueConstraint("client_id", "video_id", name="uq_camera_client_video"),)
 
     id: Mapped[str] = mapped_column(String, primary_key=True, default=lambda: str(uuid4()))
     name: Mapped[str] = mapped_column(String, nullable=False)
 
+    client_id: Mapped[str] = mapped_column(String, nullable=False, default="legacy", index=True)
     video_id: Mapped[str] = mapped_column(String, ForeignKey("videos.id"), nullable=False)
     video = relationship("Video", lazy="joined")
 
     device_path: Mapped[str] = mapped_column(String, nullable=False)
+    device_label: Mapped[Optional[str]] = mapped_column(String, nullable=True)
 
     status: Mapped[str] = mapped_column(String, nullable=False, default="stopped")
     pid: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)

@@ -21,7 +21,8 @@ class Camera(Base):
     video_id: Mapped[str] = mapped_column(String, ForeignKey("videos.id"), nullable=False)
     video = relationship("Video", lazy="joined")
 
-    device_path: Mapped[str] = mapped_column(String, nullable=False)
+    # Legacy virtual-camera path; unused for direct streaming (empty string for new rows).
+    device_path: Mapped[str] = mapped_column(String, nullable=False, default="")
     device_label: Mapped[Optional[str]] = mapped_column(String, nullable=True)
 
     status: Mapped[str] = mapped_column(String, nullable=False, default="stopped")

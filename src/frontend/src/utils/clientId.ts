@@ -1,7 +1,8 @@
 const STORAGE_KEY = "virtual_camera_client_id";
 
 /**
- * Stable per-browser session id for virtual camera ownership (Linux deduplication).
+ * Stable per-browser client id used to make camera creation idempotent:
+ * (client_id, video_id) -> same stream session.
  */
 export function getOrCreateClientId(): string {
   if (typeof window === "undefined" || typeof localStorage === "undefined") {

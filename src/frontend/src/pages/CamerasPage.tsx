@@ -47,11 +47,13 @@ export default function CamerasPage() {
         <div className="panel tips-panel">
           <h2>Tips</h2>
           <div className="muted">
-            - Linux: install <code>v4l2loopback</code> (and tools for dynamic device creation, optional)
+            - MediaMTX must be running for RTSP output
             <br />
-            - The backend assigns a free <code>/dev/videoX</code> per client + video
+            - FFmpeg must be installed and available to the backend
             <br />
-            - If a camera shows running but PID is dead, try restart
+            - Each <code>client_id</code> + video gets one reusable stream session (create is idempotent)
+            <br />
+            - Use HTTP Live for browser preview; use RTSP in VLC/OpenCV/etc.
           </div>
           <div style={{ marginTop: 12 }}>
             <button className="btn" onClick={refresh}>

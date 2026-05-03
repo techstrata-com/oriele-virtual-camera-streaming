@@ -60,11 +60,7 @@ def delete_camera(camera_id: str, db: Session = Depends(get_db)):
 def get_camera_stream_urls(camera_id: str, db: Session = Depends(get_db)):
     cam = camera_service.get_camera(db, camera_id)
 
-    available = (
-        cam.status == "running"
-        and bool(getattr(cam, "rtsp_url", None))
-        and bool(getattr(cam, "http_live_url", None))
-    )
+    available = cam.status in {"running", "paused"} and bool(cam.rtsp_url) and bool(cam.http_live_url)
 
     if not available:
         return {

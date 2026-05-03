@@ -9,15 +9,15 @@ export default function App() {
       <div className="container">
         <div className="topbar">
           <div className="brand">
-            <b>Virtual Camera Platform</b>
-            <span className="muted">Upload videos → expose as /dev/videoX</span>
+            <b>Video streaming sessions</b>
+            <span className="muted">Upload videos → start RTSP + HTTP live streams</span>
           </div>
           <nav className="nav">
             <NavLink to="/" end className={({ isActive }) => (isActive ? "active" : "")}>
               Videos
             </NavLink>
             <NavLink to="/cameras" className={({ isActive }) => (isActive ? "active" : "")}>
-              Cameras
+              Streams
             </NavLink>
           </nav>
         </div>

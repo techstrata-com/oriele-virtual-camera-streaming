@@ -31,6 +31,16 @@ export async function restartCamera(cameraId: string): Promise<Camera> {
   return res.data;
 }
 
+export async function pauseCamera(cameraId: string): Promise<Camera> {
+  const res = await api.post<Camera>(`/api/cameras/${cameraId}/pause`);
+  return res.data;
+}
+
+export async function resumeCamera(cameraId: string): Promise<Camera> {
+  const res = await api.post<Camera>(`/api/cameras/${cameraId}/resume`);
+  return res.data;
+}
+
 export async function deleteCamera(cameraId: string): Promise<void> {
   await api.delete(`/api/cameras/${cameraId}`);
 }

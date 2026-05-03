@@ -10,11 +10,10 @@ class CameraCreate(BaseModel):
     client_id: str = Field(..., min_length=1, examples=["client-123"])
     name: str
     video_id: str
-    # Linux: optional — backend allocates /dev/videoX when omitted.
-    # macOS/Windows: optional — defaults to obs/auto behavior when omitted.
+    # Deprecated: ignored. Kept for API compatibility with older clients.
     device_path: Optional[str] = Field(
         default=None,
-        examples=["/dev/video10", "obs", "auto"],
+        examples=[None],
     )
     fps: Optional[float] = None
     width: Optional[int] = None
@@ -39,7 +38,7 @@ class CameraOut(BaseModel):
     name: str
     client_id: str
     video_id: str
-    device_path: str
+    device_path: Optional[str] = None
     device_label: Optional[str] = None
     status: str
     pid: Optional[int] = None
@@ -54,3 +53,17 @@ class CameraOut(BaseModel):
     updated_at: datetime
     last_started_at: Optional[datetime] = None
     last_stopped_at: Optional[datetime] = None
+
+    @field_validator("device_path", mode="before")
+    @classmethod
+    def _empty_device_path(cls, v: object) -> object:
+        if v == "":
+            return None
+        return v
+
+    @field_validator("device_label", mode="before")
+    @classmethod
+    def _empty_device_label(cls, v: object) -> object:
+        if v == "":
+            return None
+        return v

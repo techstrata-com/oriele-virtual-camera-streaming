@@ -3,6 +3,7 @@ export type CameraStatus =
   | "stopped"
   | "starting"
   | "running"
+  | "paused"
   | "stopping"
   | "failed";
 
@@ -11,10 +12,11 @@ export type Camera = {
   name: string;
   client_id: string;
   video_id: string;
-  device_path: string;
+  // Legacy fields (deprecated by backend; kept for compatibility)
+  device_path?: string | null;
   device_label?: string | null;
   status: CameraStatus;
-  pid?: number | null;
+  pid?: number | null; // legacy (old worker pid)
   rtsp_pid?: number | null;
   rtsp_url?: string | null;
   http_live_url?: string | null;

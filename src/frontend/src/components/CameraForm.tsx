@@ -15,8 +15,6 @@ export default function CameraForm({ videos, defaultVideoId, onCreated }: Props)
   const defaultId = useMemo(() => defaultVideoId ?? videos[0]?.id ?? "", [defaultVideoId, videos]);
   const [name, setName] = useState("");
   const [videoId, setVideoId] = useState(defaultId);
-  const [showAdvanced, setShowAdvanced] = useState(false);
-  const [devicePath, setDevicePath] = useState("");
   const [fps, setFps] = useState<string>("30");
   const [width, setWidth] = useState<string>("1280");
   const [height, setHeight] = useState<string>("720");
@@ -47,18 +45,15 @@ export default function CameraForm({ videos, defaultVideoId, onCreated }: Props)
         client_id: clientId,
         name: name.trim(),
         video_id: videoId,
+        device_path: null, // deprecated; keep for backend compatibility
         fps: fps ? Number(fps) : null,
         width: width ? Number(width) : null,
         height: height ? Number(height) : null,
         loop,
       };
-      const adv = devicePath.trim();
-      if (showAdvanced && adv) {
-        payload.device_path = adv;
-      }
       const cam = await createCamera(payload);
       onCreated(cam);
-      setSuccess("Camera ready.");
+      setSuccess("Stream session ready.");
     } catch (err: any) {
       setError(err?.response?.data?.detail ?? "Failed to create camera.");
     } finally {
@@ -68,7 +63,7 @@ export default function CameraForm({ videos, defaultVideoId, onCreated }: Props)
 
   return (
     <div className="panel">
-      <h2>Create camera</h2>
+      <h2>Create stream session</h2>
       <form onSubmit={onSubmit}>
         <div className="field">
           <label>Client ID</label>
@@ -76,7 +71,7 @@ export default function CameraForm({ videos, defaultVideoId, onCreated }: Props)
             <code>{clientId}</code>
           </div>
           <div className="muted" style={{ marginTop: 4, fontSize: 12 }}>
-            Used so the server can reuse the same virtual camera when you create again for the same video.
+            Used to reuse the same stream session when you create again for the same video.
           </div>
         </div>
         <div className="field">
@@ -90,30 +85,8 @@ export default function CameraForm({ videos, defaultVideoId, onCreated }: Props)
           </select>
         </div>
         <div className="field">
-          <label>Camera name</label>
+          <label>Session name</label>
           <input value={name} onChange={(e) => setName(e.target.value)} placeholder="Entry Gate Camera" />
-        </div>
-        <div className="field">
-          <label>
-            <button
-              type="button"
-              className="btn sm"
-              style={{ marginRight: 8 }}
-              onClick={() => setShowAdvanced(!showAdvanced)}
-            >
-              {showAdvanced ? "Hide" : "Advanced"}: device path
-            </button>
-            <span className="muted" style={{ fontSize: 13 }}>
-              Linux: leave unset to auto-assign <code>/dev/videoX</code>
-            </span>
-          </label>
-          {showAdvanced && (
-            <input
-              value={devicePath}
-              onChange={(e) => setDevicePath(e.target.value)}
-              placeholder="/dev/video10 (optional)"
-            />
-          )}
         </div>
         <div className="grid" style={{ marginTop: 0 }}>
           <div className="field">
@@ -142,10 +115,7 @@ export default function CameraForm({ videos, defaultVideoId, onCreated }: Props)
           <button className="btn primary" disabled={busy || videos.length === 0} type="submit">
             {busy ? "Creating..." : "Create"}
           </button>
-          <span className="muted">
-            On Linux the backend picks a free <code>/dev/video</code> device and labels it with your client id and video name.
-            macOS/Windows: optional advanced path or defaults for OBS. Stream URLs appear after Start.
-          </span>
+          <span className="muted">Stream URLs appear after Start.</span>
         </div>
       </form>
       {error && <div className="error" style={{ marginTop: 10 }}>{error}</div>}

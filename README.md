@@ -1,149 +1,226 @@
-# virtual-camera-platform
+# oriele-virtual-camera-streaming
 
-Upload video files, create **virtual cameras**, and expose each as a Linux device such as `/dev/video10`. Each camera is owned by **`client_id` + `video_id`**. On Linux, devices are created dynamically with a **labeled** v4l2 node (`client_id - video filename`). **Generic unlabeled pre-created `/dev/video` pools are not assigned to users.**
+Upload video files, create reusable **stream sessions**, and expose each session as:
+
+- **RTSP**: `rtsp://SERVER_IP:8554/{camera_id}`
+- **HTTP live MJPEG preview**: `http://SERVER_IP:8000/live/{camera_id}`
+
+Each session is owned by **`client_id + video_id`**, so the same client/video pair **reuses** the same stream session while different clients can stream the same uploaded video **independently**.
+
+This project no longer creates or uses OS-level virtual cameras.
 
 ---
 
 ## 1. Project overview
 
-### What this project does
+The app lets you:
 
-The **virtual-camera-platform** MVP lets you:
-
-- Upload videos with metadata and thumbnails (SQLite under `data/`)
-- Create cameras tied to a caller identity (`client_id`) and a video (`video_id`)
-- Run a **worker** that streams decoded frames into a **virtual Video4Linux device** (`/dev/videoX`) using **pyvirtualcam** and **v4l2loopback**
-- Optionally expose **RTSP** (FFmpeg → **MediaMTX**) and **HTTP live MJPEG** for other applications
+- Upload videos with metadata and thumbnails (**SQLite under `data/`**)
+- Create stream sessions tied to **`client_id + video_id`** (idempotent creation)
+- Start a dedicated backend **`stream_worker`** per running session
+- Publish RTSP via **FFmpeg → MediaMTX**
+- Preview via **FastAPI MJPEG** at `GET /live/{camera_id}`
+- Pause/resume **without killing** the worker
+- Stop/restart/delete sessions
 
 ### Main features
 
-- FastAPI backend with Swagger at `/docs`
-- React/Vite frontend; **`client_id` is stored in `localStorage`**
-- Camera CRUD; **start / stop / restart** APIs
-- **Create camera is idempotent** per `client_id` + `video_id` (same pair returns the same camera)
-- **Pause / resume**: freezes the virtual camera stream without killing the worker; resume continues from the same position. **Stop** tears down the worker and RTSP sidecar processes.
+- FastAPI backend with Swagger at `http://SERVER_IP:8000/docs`
+- React/Vite frontend; `client_id` is stored in `localStorage`
+- SQLite database stored in `data/app.db`
+- MediaMTX RTSP integration (default `:8554`)
+- FFmpeg-based RTSP publishing
+- OpenCV-based frame reading in the stream worker
+- Cross-platform backend process management (Windows/Linux/macOS)
+- Create session idempotency by `client_id + video_id` (prevents concurrency issues)
 
-### What is Linux-only
+### Platform support
 
-- Real **`/dev/videoX`** output via **v4l2loopback** and **pyvirtualcam**
-- **Dynamic labeled** loopback devices via `v4l2loopback-ctl add -n "<label>" /dev/videoN` (v4l2loopback **0.13+**)
+The direct streaming backend can run on **Windows**, **Linux**, or **macOS** as long as:
 
-### What works on Windows or macOS (local testing only)
+- **FFmpeg** is installed and reachable (or configured via `FFMPEG_BINARY`)
+- **MediaMTX** is running for RTSP output
 
-You can run the backend and frontend for API/UI development, but **production virtual camera devices and labeled loopback behavior target Linux**. Other platforms may use alternate code paths for streaming tests; treat them as **not** a substitute for Linux deployment validation.
+Linux is recommended for production servers, but the app **no longer depends** on Linux-only virtual camera devices.
 
 ---
 
 ## 2. Architecture
 
-High-level flow:
+### High-level flow
 
-1. **Upload video** — Client uploads a file; backend stores it and returns a **`video_id`**.
-2. **Create camera** — Client sends `client_id`, `video_id`, and options. **`device_path: null`** means **auto** allocation on Linux (dynamic labeled device). The same **`client_id` + `video_id`** yields the **same camera id** (idempotent).
-3. **Backend allocates a labeled v4l2loopback device** — Within `VIRTUAL_CAMERA_START_NR` … `VIRTUAL_CAMERA_END_NR`, the backend runs **`v4l2loopback-ctl add -n "<label>" /dev/videoN`** so the sysfs name is **`client_id - video filename`**. Unlabeled pre-created nodes in that range are **not** handed to users.
-4. **Worker streams frames** — A subprocess **camera worker** reads the video and writes frames into **`/dev/videoX`** via pyvirtualcam.
-5. **FFmpeg pushes RTSP to MediaMTX** — When RTSP is enabled and the camera is running, FFmpeg publishes to the RTSP server (default listener **`:8554`**).
-6. **HTTP live** — **`GET /live/{camera_id}`** serves **MJPEG** from the running virtual camera pipeline.
-7. **Consumers** — Other projects use **`rtsp://…/{camera_id}`** or **`http://…/live/{camera_id}`**, or read **`/dev/videoX`** directly on the host.
+1. **Upload video**
+   - Client uploads a video.
+   - Backend stores it under `data/videos`.
+   - Backend returns a `video_id`.
 
-### Project layout
+2. **Create stream session**
+   - Client sends `client_id`, `video_id`, a name, and options (`fps`, `width`, `height`, `loop`).
+   - Backend creates or reuses a camera/session row.
+   - Same `client_id + video_id` returns the same `camera_id`.
 
-- `src/backend` — FastAPI, workers, services
-- `src/frontend` — React UI
-- `scripts` — Optional v4l2loopback helpers
-- `data/` — Videos, thumbnails, logs, **SQLite database file**
+3. **Start session**
+   - Backend sets status to `starting`.
+   - Backend spawns `app.workers.stream_worker`.
+   - Worker reads the uploaded video via OpenCV.
+   - Worker writes raw frames to **FFmpeg stdin**.
+   - FFmpeg publishes RTSP to MediaMTX at path `/{camera_id}`.
+   - Backend returns:
+     - `rtsp_url`
+     - `http_live_url`
+
+4. **HTTP live preview**
+   - `GET /live/{camera_id}` serves an MJPEG preview.
+   - Preview respects pause/resume state.
+
+5. **Pause / resume**
+   - Pause creates `data/controls/{camera_id}/pause.flag`.
+   - Worker repeats the last frame and does not advance playback.
+   - Resume removes the flag; playback continues from the same position.
+
+6. **Stop / restart**
+   - Stop terminates the stream worker and its FFmpeg child.
+   - Restart is stop + start.
+
+### Diagram
+
+```text
+Uploaded video file
+        ↓
+stream_worker (OpenCV)
+        ↓
+FFmpeg stdin
+        ↓
+MediaMTX
+        ↓
+RTSP: rtsp://SERVER_IP:8554/{camera_id}
+
+FastAPI /live/{camera_id}
+        ↓
+HTTP MJPEG preview
+```
+
+RTSP and HTTP preview are separate outputs and may not be frame-perfect synchronized unless later changed to a shared frame pipeline.
 
 ---
 
-## 3. Requirements
+## 3. Project layout
+
+- `src/backend` — FastAPI backend, stream worker, services
+- `src/frontend` — React/Vite UI
+- `data/videos` — uploaded videos
+- `data/thumbnails` — generated thumbnails
+- `data/controls` — pause/resume control flags (`pause.flag`)
+- `data/logs` — per-camera worker/FFmpeg logs (`camera_<camera_id>.log`)
+- `data/app.db` — SQLite database
+
+Note: `scripts/` may contain legacy helpers, but they are not required for this architecture and are not documented here.
+
+---
+
+## 4. Requirements
 
 | Component | Notes |
-|-----------|--------|
-| **OS** | **Ubuntu 22.04 or 24.04** recommended for servers |
-| **Python** | **3.10+** |
-| **Node.js** | **18+** (with `npm`) |
-| **FFmpeg** | On `PATH` or set `FFMPEG_BINARY` |
-| **v4l2loopback** | Kernel module — package **`v4l2loopback-dkms`** |
-| **v4l2loopback-utils** | Provides **`v4l2loopback-ctl`** |
-| **v4l-utils** | `v4l2-ctl`, debugging |
-| **MediaMTX** | RTSP server (separate install; see deployment) |
+|-----------|------|
+| **OS** | Windows, Linux, or macOS. Linux recommended for server deployment. |
+| **Python** | 3.10+ |
+| **Node.js** | 18+ (with `npm`) |
+| **FFmpeg** | Must be installed and available on `PATH` or configured with `FFMPEG_BINARY` |
+| **MediaMTX** | RTSP server (required for RTSP playback) |
 | **Git** | Clone the repository |
-| **sudo, curl, unzip** | Deployment and MediaMTX download/extract |
+| **curl / unzip** | Useful for deployment and MediaMTX install |
 
-Also: **OpenCV** (via `opencv-python`), **pyvirtualcam** (see `src/backend/requirements.txt`).
+Python dependencies include: FastAPI, SQLAlchemy, OpenCV (`opencv-python`), `python-dotenv`, `python-multipart`.
 
 ---
 
-## 4. Linux server deployment from zero
+## 5. Local development setup
 
-Replace placeholders everywhere:
+### MediaMTX (RTSP server)
 
-- **`SERVER_IP`** — Public or LAN IP of the server (or `localhost` for local-only tests)
-- **`YOUR_USER`** — Unprivileged user that runs the backend (and owns the repo)
-- **`YOUR_REPO_URL`** — Git remote URL for this project
+Start MediaMTX first:
 
-### A. Update the server
+**Windows (PowerShell):**
 
-```bash
-sudo apt update
-sudo apt upgrade -y
+```powershell
+cd "PATH_TO_MEDIAMTX_FOLDER"
+.\mediamtx.exe
 ```
 
-### B. Install packages
+**Linux/macOS:**
 
 ```bash
-sudo apt install -y git python3 python3-venv python3-pip nodejs npm ffmpeg v4l2loopback-dkms v4l2loopback-utils v4l-utils sudo curl unzip
+cd /path/to/mediamtx
+./mediamtx
 ```
 
-### C. Check versions
+You should see a log line similar to:
 
-```bash
-python3 --version
-node --version
-npm --version
-ffmpeg -version
+```text
+RTSP listener opened on :8554
 ```
 
-If `node --version` reports lower than **18**, install **Node.js 18+** using [NodeSource](https://github.com/nodesource/distributions) or **nvm** instead of relying on the default Ubuntu `apt` packages.
+### Backend (FastAPI)
 
-**Reason:** `sudo apt install nodejs npm` may install an older Node.js on some Ubuntu releases; the frontend expects Node.js **18+**.
+**Windows (PowerShell):**
 
-### D. Load the v4l2loopback module
-
-```bash
-sudo modprobe v4l2loopback
-lsmod | grep v4l2loopback
-ls /sys/module/v4l2loopback
+```powershell
+cd "PATH_TO_PROJECT\src\backend"
+python -m venv .venv
+.\.venv\Scripts\Activate.ps1
+pip install -r requirements.txt
+uvicorn app.main:app --reload --host 127.0.0.1 --port 8000
 ```
 
-### E. Clone the project
+**Linux/macOS:**
 
 ```bash
-cd /opt
-sudo git clone <YOUR_REPO_URL> virtual-camera-platform
-sudo chown -R $USER:$USER /opt/virtual-camera-platform
-cd /opt/virtual-camera-platform
-```
-
-### F. Set up the backend
-
-```bash
-cd /opt/virtual-camera-platform/src/backend
+cd src/backend
 python3 -m venv .venv
 source .venv/bin/activate
-pip install --upgrade pip setuptools wheel
 pip install -r requirements.txt
+uvicorn app.main:app --reload --host 127.0.0.1 --port 8000
 ```
 
-### G. Backend environment file
-
-Create the file:
+### Frontend (React/Vite)
 
 ```bash
-nano /opt/virtual-camera-platform/src/backend/.env
+cd src/frontend
+npm install
+npm run dev
 ```
 
-Example (adjust **`SERVER_IP`** and paths as needed):
+### Useful URLs (local)
+
+- Swagger: `http://localhost:8000/docs`
+- Frontend: `http://localhost:5173`
+- RTSP: `rtsp://localhost:8554/{camera_id}`
+- HTTP live: `http://localhost:8000/live/{camera_id}`
+
+---
+
+## 6. Environment variables
+
+### Backend `.env`
+
+Create: `src/backend/.env`
+
+Local example:
+
+```env
+FRONTEND_ORIGIN=http://localhost:5173
+
+RTSP_ENABLED=true
+RTSP_HOST=localhost
+RTSP_PORT=8554
+RTSP_PUBLIC_BASE_URL=rtsp://localhost:8554
+HTTP_LIVE_PUBLIC_BASE_URL=http://localhost:8000
+
+FFMPEG_BINARY=ffmpeg
+STREAM_DEFAULT_FPS=30
+```
+
+Server example (clients connect via `SERVER_IP`):
 
 ```env
 FRONTEND_ORIGIN=http://SERVER_IP:5173
@@ -155,154 +232,141 @@ RTSP_PUBLIC_BASE_URL=rtsp://SERVER_IP:8554
 HTTP_LIVE_PUBLIC_BASE_URL=http://SERVER_IP:8000
 
 FFMPEG_BINARY=ffmpeg
-
-VIRTUAL_CAMERA_START_NR=10
-VIRTUAL_CAMERA_END_NR=99
-VIRTUAL_CAMERA_DYNAMIC_CREATE=true
-V4L2LOOPBACK_CTL_BINARY=v4l2loopback-ctl
-V4L2LOOPBACK_USE_SUDO=true
+STREAM_DEFAULT_FPS=30
 ```
 
-**`SERVER_IP`** must match how clients reach the server (browser, VLC, other services). For TLS or reverse proxies, set `FRONTEND_ORIGIN` and public URLs to match your real scheme/host.
+Explanation:
 
-The backend loads **`src/backend/.env`** automatically via **`python-dotenv`**. Real **OS/systemd** environment variables take priority over `.env`; values in **`config.py`** are defaults used only when neither the OS environment nor `.env` provides a setting.
+- `RTSP_HOST` / `RTSP_PORT` are used by the backend/FFmpeg to **publish** to MediaMTX.
+- `RTSP_PUBLIC_BASE_URL` is what clients should use to **watch** RTSP.
+- `HTTP_LIVE_PUBLIC_BASE_URL` is what clients should use for browser preview.
+- If clients are outside the server, do **not** use `localhost` in public URLs.
 
-After changing **`src/backend/.env`**, restart the backend. With systemd:
+The backend automatically loads `src/backend/.env` via `python-dotenv`. OS/systemd environment variables can override `.env`. Code defaults are used only when no env value exists.
 
-```bash
-sudo systemctl restart virtual-camera-backend
+### Frontend `.env`
+
+Create: `src/frontend/.env`
+
+Local:
+
+```env
+VITE_API_BASE_URL=http://localhost:8000
 ```
 
-For a manual `uvicorn` run, stop the process and start it again.
-
-| Variable | Role |
-|----------|------|
-| `FRONTEND_ORIGIN` | CORS / frontend origin |
-| `RTSP_*`, `HTTP_LIVE_PUBLIC_BASE_URL` | URLs shown to users or used by integrations |
-| `FFMPEG_BINARY` | FFmpeg executable |
-| `VIRTUAL_CAMERA_*` | Minor range and **required** dynamic creation for labeled devices |
-| `V4L2LOOPBACK_*` | Control binary path; **`V4L2LOOPBACK_USE_SUDO=true`** when using passwordless sudo (see below) |
-
-### H. Permissions for dynamic labeled virtual cameras
-
-Creating devices requires:
-
-```bash
-v4l2loopback-ctl add -n "<label>" /dev/videoN
-```
-
-Choose **one** approach.
-
-#### Option A — Run the backend as root
-
-Run `uvicorn` (or systemd) as **`root`** so `v4l2loopback-ctl add` succeeds without sudo configuration. **Not recommended** for production unless you accept the security tradeoff.
-
-#### Option B — Passwordless sudo only for `v4l2loopback-ctl` (recommended pattern)
-
-1. Note the real path to the binary:
-
-```bash
-which v4l2loopback-ctl
-```
-
-2. Edit a dedicated sudoers drop-in (use **`visudo`**):
-
-```bash
-sudo visudo -f /etc/sudoers.d/vcam-v4l2
-```
-
-Example line (replace **`YOUR_USER`** and path if different):
-
-```text
-YOUR_USER ALL=(root) NOPASSWD: /usr/bin/v4l2loopback-ctl
-```
-
-3. Validate:
-
-```bash
-sudo visudo -cf /etc/sudoers.d/vcam-v4l2
-sudo -n v4l2loopback-ctl --help
-```
-
-4. Set **`V4L2LOOPBACK_USE_SUDO=true`** in `.env` so the backend runs non-interactive:
-
-`sudo -n … v4l2loopback-ctl add …`
-
-If `sudo -n` cannot run without a password, the API should **fail with a clear error** (no silent fallback to unlabeled devices).
-
-**Future option:** a small privileged helper or polkit rule—document your own integration if you add one.
-
-### I. Run the backend manually
-
-```bash
-cd /opt/virtual-camera-platform/src/backend
-source .venv/bin/activate
-uvicorn app.main:app --host 0.0.0.0 --port 8000
-```
-
-- API root: `http://SERVER_IP:8000`
-- **Swagger:** `http://SERVER_IP:8000/docs`
-- **HTTP live:** `http://SERVER_IP:8000/live/{camera_id}`
-
-### J. Set up the frontend
-
-```bash
-cd /opt/virtual-camera-platform/src/frontend
-npm install
-```
-
-Create `src/frontend/.env`:
-
-```bash
-nano /opt/virtual-camera-platform/src/frontend/.env
-```
+Server:
 
 ```env
 VITE_API_BASE_URL=http://SERVER_IP:8000
 ```
 
-**Development** (bind on all interfaces):
+---
+
+## 7. Linux server deployment from zero
+
+Replace placeholders:
+
+- `SERVER_IP` — public/LAN IP of the server
+- `YOUR_USER` — user that runs the backend
+- `YOUR_REPO_URL` — git URL of this repo
+
+### A. Update server
+
+```bash
+sudo apt update
+sudo apt upgrade -y
+```
+
+### B. Install packages
+
+```bash
+sudo apt install -y git python3 python3-venv python3-pip nodejs npm ffmpeg curl unzip
+```
+
+### C. Check versions
+
+```bash
+python3 --version
+node --version
+npm --version
+ffmpeg -version
+```
+
+If `node --version` is lower than **18**, install Node.js 18+ using NodeSource or `nvm`.
+
+### D. Clone project
+
+```bash
+cd /opt
+sudo git clone <YOUR_REPO_URL> video-streaming-platform
+sudo chown -R $USER:$USER /opt/video-streaming-platform
+cd /opt/video-streaming-platform
+```
+
+### E. Backend setup
+
+```bash
+cd /opt/video-streaming-platform/src/backend
+python3 -m venv .venv
+source .venv/bin/activate
+pip install --upgrade pip setuptools wheel
+pip install -r requirements.txt
+```
+
+### F. Backend `.env`
+
+Create `/opt/video-streaming-platform/src/backend/.env` using the server example above.
+
+### G. Run backend manually
+
+```bash
+cd /opt/video-streaming-platform/src/backend
+source .venv/bin/activate
+uvicorn app.main:app --host 0.0.0.0 --port 8000
+```
+
+### H. Frontend setup
+
+```bash
+cd /opt/video-streaming-platform/src/frontend
+npm install
+```
+
+Create `/opt/video-streaming-platform/src/frontend/.env`:
+
+```env
+VITE_API_BASE_URL=http://SERVER_IP:8000
+```
+
+Development:
 
 ```bash
 npm run dev -- --host 0.0.0.0
 ```
 
-**Production build** (static files to serve with nginx or similar):
+Production build:
 
 ```bash
 npm run build
 ```
 
-### K. Install and run MediaMTX
+### I. MediaMTX install
 
-1. Download the correct **Linux** archive for your server **CPU architecture** from the [MediaMTX releases](https://github.com/bluenviron/mediamtx/releases) page (pick the current release; filenames and version tags change over time). For most VPS hosts, use the **Linux amd64** build. On **ARM** servers (for example Raspberry Pi or ARM cloud instances), choose the matching **ARM** asset instead.
-2. Extract to **`/opt/mediamtx`** (layout should include the `mediamtx` binary at `/opt/mediamtx/mediamtx`).
-3. Run:
+1. Download the correct archive for your CPU architecture from the MediaMTX releases page.
+2. Extract to `/opt/mediamtx` and run:
 
 ```bash
 cd /opt/mediamtx
 ./mediamtx
 ```
 
-You should see a log line similar to:
-
-```text
-RTSP listener opened on :8554
-```
-
-Confirm something is listening on RTSP **TCP** port **8554**:
+Check RTSP listener:
 
 ```bash
 ss -ltnp | grep 8554
 ```
 
-You should see a listener bound to port **8554** (process name may show as `mediamtx`).
-
-Keep MediaMTX running whenever you need RTSP. For production, use the **systemd** unit in [Systemd setup](#systemd-setup).
-
-### L. Firewall (UFW)
-
-Minimum for API + HTTP live + RTSP:
+### J. Firewall (UFW)
 
 ```bash
 sudo ufw allow 8000/tcp
@@ -311,55 +375,32 @@ sudo ufw reload
 sudo ufw status
 ```
 
-Optional (development frontend, extra MediaMTX ports):
+Optional (frontend dev server):
 
 ```bash
 sudo ufw allow 5173/tcp
-sudo ufw allow 8888/tcp
-sudo ufw allow 8889/tcp
-sudo ufw reload
-sudo ufw status
 ```
-
-| Port | Typical use |
-|------|-------------|
-| **8000** | Backend API + **HTTP live MJPEG** |
-| **8554** | **RTSP** (MediaMTX) |
-| **5173** | Vite dev server only |
-| **8888 / 8889** | Often used by MediaMTX defaults (HLS / WebRTC, etc.) — open only if you use those features |
-
-### M. Full test flow
-
-1. Open the frontend (`http://SERVER_IP:5173` in dev, or your static hosting URL).
-2. **Upload** a video on the Videos page.
-3. **Create camera** with `device_path: null` for Linux auto allocation.
-4. Confirm devices and label:
-
-```bash
-ls -l /dev/video*
-cat /sys/class/video4linux/video10/name
-```
-
-(Adjust `video10` to the minor your deployment used.) **Expected name format:** `client-id - video-name.mp4`
-
-5. **Start** the camera from the UI or API.
-6. **RTSP in VLC:** `Media → Open Network Stream` → `rtsp://SERVER_IP:8554/{camera_id}`
-7. **HTTP live in a browser:** `http://SERVER_IP:8000/live/{camera_id}`
 
 ---
 
-## 5. API usage examples
+## 8. API usage examples
 
-### Create camera (idempotent)
+### Upload video
 
-`POST /api/cameras`
+`POST /api/videos/upload`
 
-Example body:
+```bash
+curl -F "file=@/path/to/video.mp4" http://localhost:8000/api/videos/upload
+```
+
+### Create stream session (idempotent)
+
+Endpoint stays `POST /api/cameras` (API naming kept for compatibility).
 
 ```json
 {
   "client_id": "parking-client-001",
-  "name": "Parking Entry Camera",
+  "name": "Parking Entry Stream",
   "video_id": "VIDEO_ID_FROM_UPLOAD",
   "device_path": null,
   "fps": 30,
@@ -369,48 +410,79 @@ Example body:
 }
 ```
 
-- **`client_id`** — Caller / user / session / project identifier (stable for that tenant).
-- **`name`** — Display name in the UI.
-- **`video_id`** — Returned by the upload API after a successful upload.
-- **`device_path`** — Use **`null`** on Linux for **automatic** dynamic labeled device creation. Do not point at generic unlabeled pool devices for multi-tenant assignment.
-- **Same `client_id` + `video_id`** → **same camera id** (idempotent).
-- **Different `client_id`** + **same `video_id`** → **new** virtual camera (separate device allocation).
+Notes:
 
-### Pause and resume
+- `client_id`: stable identifier for the caller/tenant/session.
+- `video_id`: returned by upload.
+- `device_path`: **deprecated and ignored**; keep `null` for backward compatibility.
+- Same `client_id + video_id` returns the same `camera_id`.
+- Different `client_id` with the same `video_id` creates a separate stream session.
 
-| Action | Method | Path |
-|--------|--------|------|
-| Pause | `POST` | `/api/cameras/{camera_id}/pause` |
-| Resume | `POST` | `/api/cameras/{camera_id}/resume` |
-
-**Pause** freezes the virtual camera stream (and HTTP live behavior) **without** killing the worker. **Resume** continues from the **same** playback position. **Stop** (`POST /api/cameras/{camera_id}/stop`) stops the worker and RTSP-related processes.
-
-Start / stop / restart:
+### Start / pause / resume / stop / restart
 
 - `POST /api/cameras/{camera_id}/start`
+- `POST /api/cameras/{camera_id}/pause`
+- `POST /api/cameras/{camera_id}/resume`
 - `POST /api/cameras/{camera_id}/stop`
 - `POST /api/cameras/{camera_id}/restart`
 
-Full route list and schemas: **`http://SERVER_IP:8000/docs`**.
+Pause/resume behavior:
+
+- Pause freezes the stream by making the worker repeat the last frame while keeping RTSP alive.
+- Resume continues from the same playback position.
+- Stop terminates the worker and FFmpeg child process.
+
+Stream URLs:
+
+- `GET /api/cameras/{camera_id}/stream-urls`
+- `GET /live/{camera_id}`
+
+Full route list and schemas: `http://SERVER_IP:8000/docs`
 
 ---
 
-## 6. Systemd setup
+## 9. Testing flow
+
+1. Start MediaMTX.
+2. Start backend.
+3. Start frontend.
+4. Upload a video.
+5. Create a stream session.
+6. Confirm list shows stopped session (no device path).
+7. Start stream.
+8. Confirm the returned camera has:
+   - `status = running`
+   - `rtsp_pid != null`
+   - `rtsp_url`
+   - `http_live_url`
+9. Open HTTP live: `http://localhost:8000/live/{camera_id}`
+10. Open RTSP in VLC: `rtsp://localhost:8554/{camera_id}`
+11. Pause → verify preview/RTSP freezes.
+12. Resume → verify stream continues.
+13. Stop → verify URLs unavailable.
+14. Create same client/video again → verify same session id is reused.
+15. Create different client/same video → verify a different session id.
+
+Remember: HTTP preview and RTSP may not be perfectly synchronized because HTTP preview is a separate MJPEG path.
+
+---
+
+## 10. Systemd setup (Linux)
 
 ### Backend service
 
-Create `/etc/systemd/system/virtual-camera-backend.service`:
+Create `/etc/systemd/system/video-streaming-backend.service`:
 
 ```ini
 [Unit]
-Description=Virtual Camera Platform Backend
+Description=Video Streaming Platform Backend
 After=network.target
 
 [Service]
 User=YOUR_USER
-WorkingDirectory=/opt/virtual-camera-platform/src/backend
-EnvironmentFile=/opt/virtual-camera-platform/src/backend/.env
-ExecStart=/opt/virtual-camera-platform/src/backend/.venv/bin/uvicorn app.main:app --host 0.0.0.0 --port 8000
+WorkingDirectory=/opt/video-streaming-platform/src/backend
+EnvironmentFile=/opt/video-streaming-platform/src/backend/.env
+ExecStart=/opt/video-streaming-platform/src/backend/.venv/bin/uvicorn app.main:app --host 0.0.0.0 --port 8000
 Restart=always
 RestartSec=3
 
@@ -422,10 +494,10 @@ Enable and run:
 
 ```bash
 sudo systemctl daemon-reload
-sudo systemctl enable virtual-camera-backend
-sudo systemctl start virtual-camera-backend
-sudo systemctl status virtual-camera-backend
-journalctl -u virtual-camera-backend -f
+sudo systemctl enable video-streaming-backend
+sudo systemctl start video-streaming-backend
+sudo systemctl status video-streaming-backend
+journalctl -u video-streaming-backend -f
 ```
 
 ### MediaMTX service
@@ -457,125 +529,82 @@ sudo systemctl status mediamtx
 journalctl -u mediamtx -f
 ```
 
-Adjust **`User=`** for MediaMTX if you do not want it running as root (match your install permissions).
-
 ---
 
-## 7. Debugging commands
+## 11. Debugging commands
+
+### Linux
 
 ```bash
-ls -l /dev/video*
-v4l2-ctl --list-devices
-for f in /sys/class/video4linux/video*/name; do echo "$f: $(cat $f)"; done
-ps aux | grep camera_worker
+ps aux | grep stream_worker
 ps aux | grep ffmpeg
-journalctl -u virtual-camera-backend -f
+ps aux | grep mediamtx
+journalctl -u video-streaming-backend -f
 journalctl -u mediamtx -f
+tail -f /opt/video-streaming-platform/data/logs/camera_<camera_id>.log
 ```
 
 Manual cleanup (use with care):
 
 ```bash
+pkill -f app.workers.stream_worker
 pkill -f ffmpeg
-pkill -f camera_worker
+pkill -f mediamtx
+```
+
+### Windows (PowerShell)
+
+```powershell
+taskkill /F /IM ffmpeg.exe
+Get-CimInstance Win32_Process |
+  Where-Object { $_.CommandLine -like "*app.workers.stream_worker*" } |
+  ForEach-Object { Stop-Process -Id $_.ProcessId -Force }
+taskkill /F /IM mediamtx.exe
+```
+
+Inspect processes:
+
+```powershell
+Get-CimInstance Win32_Process |
+  Where-Object { $_.Name -like "*ffmpeg*" -or $_.CommandLine -like "*stream_worker*" -or $_.Name -like "*mediamtx*" } |
+  Select-Object ProcessId, Name, CommandLine
 ```
 
 ---
 
-## 8. Production notes
+## 12. Production notes
 
-- Do **not** use **`--reload`** in production.
-- Prefer **one backend process** unless you implement cross-process locking for shared resources (devices, DB assumptions).
-- **Dynamic v4l2loopback creation** needs **privileges** (root or constrained sudo).
-- **MediaMTX** must be running for **RTSP** output.
-- **FFmpeg** must be installed and callable (`FFMPEG_BINARY`).
-- If the backend **cannot create** the labeled device, it should **fail clearly**—do **not** assign **generic unlabeled** `/dev/video*` nodes to clients.
-- Each logical camera is uniquely defined by **`client_id` + `video_id`** for creation/idempotency.
+- Do not use `--reload` in production.
+- MediaMTX must be running for RTSP output.
+- FFmpeg must be installed and callable (`FFMPEG_BINARY`).
+- Use real server IP/domain in public URLs; avoid `localhost` in `RTSP_PUBLIC_BASE_URL` / `HTTP_LIVE_PUBLIC_BASE_URL`.
+- Prefer running a single backend process with SQLite unless you implement stronger cross-process coordination.
+- Each stream session is uniquely identified by `client_id + video_id`.
+- Start uses a `starting` status to avoid duplicate worker creation.
+- Multiple concurrent sessions consume CPU (OpenCV + FFmpeg); size the server accordingly.
 
 ---
 
-## 9. Expected URLs
+## 13. Expected URLs
 
 | Service | URL |
 |---------|-----|
 | Backend API | `http://SERVER_IP:8000` |
 | Swagger | `http://SERVER_IP:8000/docs` |
-| Frontend (dev) | `http://SERVER_IP:5173` |
+| Frontend dev | `http://SERVER_IP:5173` |
 | RTSP | `rtsp://SERVER_IP:8554/{camera_id}` |
-| HTTP live (MJPEG) | `http://SERVER_IP:8000/live/{camera_id}` |
+| HTTP live MJPEG | `http://SERVER_IP:8000/live/{camera_id}` |
 
 ---
 
-## 10. Consume `/dev/video` from another app
+## 14. Common deployment mistakes
 
-Example (Python + OpenCV):
-
-```python
-import cv2
-
-cap = cv2.VideoCapture("/dev/video10")
-
-while True:
-    ret, frame = cap.read()
-    if not ret:
-        continue
-
-    print(frame.shape)
-```
-
-Use the **`/dev/videoN`** minor assigned to your camera on that host.
-
----
-
-## 11. Helper scripts (optional)
-
-Legacy scripts may load `modprobe v4l2loopback` without reserved minors; the backend still **creates** labeled nodes dynamically inside the configured numeric range.
-
-```bash
-cd /opt/virtual-camera-platform
-chmod +x scripts/*.sh
-./scripts/setup_v4l2loopback.sh
-```
-
----
-
-## 12. Implementation notes
-
-- The backend spawns worker processes with **`subprocess.Popen`**.
-- Duplicate **`(client_id, video_id)`** rows are prevented on **new** SQLite databases via a unique constraint; older databases may rely on application logic and migration defaults (`client_id='legacy'` for existing rows).
-
----
-
-## Common deployment mistakes
-
-- Using **`localhost`** in public RTSP or HTTP URLs. For clients outside the server, set **`RTSP_PUBLIC_BASE_URL`** and **`HTTP_LIVE_PUBLIC_BASE_URL`** to the real server **IP or hostname** (or TLS URL behind a proxy).
-- Forgetting to **restart the backend** after editing **`src/backend/.env`**.
-- Installing an **old Node.js** from `apt` only; the frontend needs **Node.js 18+** (see version check in **Section 4C**).
-- Running **multiple backend worker processes** without cross-process locking (devices and SQLite assumptions).
-- **MediaMTX** not running while expecting **RTSP** playback.
-- Backend user **not allowed** to run **`v4l2loopback-ctl add`** (missing sudoers / wrong `V4L2LOOPBACK_USE_SUDO` setup).
-- **v4l2loopback** kernel module not loaded (`modprobe` / boot persistence).
-
----
-
-## Local quick start (development)
-
-**Backend:**
-
-```bash
-cd virtual-camera-platform/src/backend
-python -m venv .venv
-source .venv/bin/activate   # Windows: .venv\Scripts\activate
-pip install -r requirements.txt
-uvicorn app.main:app --reload --host 127.0.0.1 --port 8000
-```
-
-**Frontend:**
-
-```bash
-cd virtual-camera-platform/src/frontend
-npm install
-npm run dev
-```
-
-Use **`http://localhost:8000/docs`** and configure `.env` files for your machine. Full production deployment on Linux follows **Section 4** above.
+- Using `localhost` in public RTSP/HTTP URLs when clients are outside the server.
+- Forgetting to restart the backend after editing `src/backend/.env`.
+- Installing an old Node.js from apt (frontend requires Node.js 18+).
+- MediaMTX not running while expecting RTSP playback.
+- FFmpeg not installed or not on `PATH` (or `FFMPEG_BINARY` not set correctly).
+- Opening HTTP live without starting the stream first.
+- Trying to play RTSP directly in a browser (use VLC or an RTSP-capable client).
+- Running too many streams on a weak CPU.
+- Expecting HTTP MJPEG preview and RTSP to be frame-perfect synchronized.

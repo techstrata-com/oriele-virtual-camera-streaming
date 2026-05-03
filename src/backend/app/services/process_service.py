@@ -6,6 +6,8 @@ import platform
 import signal
 import subprocess
 import time
+import csv
+from io import StringIO
 from typing import Optional
 
 
@@ -17,8 +19,49 @@ def _is_windows() -> bool:
 
 
 def is_alive(pid: int) -> bool:
+    if pid is None:
+        return False
     try:
-        os.kill(pid, 0)
+        pid_int = int(pid)
+    except Exception:
+        return False
+    if pid_int <= 0:
+        return False
+
+    # Windows: os.kill(pid, 0) is not reliable. Use tasklist.
+    if _is_windows():
+        try:
+            # /FO CSV makes parsing reliable; /NH removes header.
+            result = subprocess.run(
+                ["tasklist", "/FI", f"PID eq {pid_int}", "/FO", "CSV", "/NH"],
+                capture_output=True,
+                text=True,
+                check=False,
+            )
+            out = (result.stdout or "").strip()
+            if not out:
+                return False
+            # When no tasks match, tasklist typically returns an INFO line.
+            if out.lower().startswith("info:"):
+                return False
+
+            # Parse CSV rows; expect PID in second column.
+            reader = csv.reader(StringIO(out))
+            for row in reader:
+                if len(row) >= 2:
+                    try:
+                        if int(row[1]) == pid_int:
+                            return True
+                    except Exception:
+                        continue
+            return False
+        except Exception:
+            # Fail closed on Windows to avoid stale \"running\" states.
+            return False
+
+    # POSIX: keep os.kill(pid, 0) semantics.
+    try:
+        os.kill(pid_int, 0)
         return True
     except ProcessLookupError:
         return False
@@ -26,7 +69,6 @@ def is_alive(pid: int) -> bool:
         # Assume alive if we can't signal it.
         return True
     except OSError:
-        # On Windows, os.kill can raise OSError for invalid/non-existent PIDs.
         return False
 
 
@@ -125,6 +167,95 @@ def stop_process(pid: int, timeout_s: float = 2.0) -> None:
             break
         time.sleep(0.05)
     logger.info("Force kill done pid=%s alive=%s", pid, is_alive(pid))
+
+
+def stop_stream_worker(pid: int, timeout_s: float = 4.0) -> None:
+    """
+    Stop the dedicated stream worker and its FFmpeg child.
+
+    Windows: taskkill /T /F terminates the worker process tree (never the backend when pid is correct).
+    POSIX: SIGTERM/SIGKILL on the worker's process group (start_new_session worker).
+    """
+    current_pid = os.getpid()
+    logger.info(
+        "stop_stream_worker target_pid=%s backend_pid=%s os=%s timeout_s=%s",
+        pid,
+        current_pid,
+        platform.system(),
+        timeout_s,
+    )
+    if pid == current_pid:
+        logger.error(
+            "Refusing to stop stream worker pid=%s because it matches the backend process.",
+            pid,
+        )
+        return
+
+    if not is_alive(pid):
+        logger.info("Stream worker already stopped pid=%s", pid)
+        return
+
+    if _is_windows():
+        try:
+            result = subprocess.run(
+                ["taskkill", "/PID", str(pid), "/T", "/F"],
+                capture_output=True,
+                text=True,
+                check=False,
+            )
+            logger.info("taskkill tree returncode pid=%s: %s", pid, result.returncode)
+            if result.stdout:
+                logger.info("taskkill stdout pid=%s: %s", pid, result.stdout.strip())
+            if result.stderr:
+                logger.warning("taskkill stderr pid=%s: %s", pid, result.stderr.strip())
+        except Exception:
+            logger.exception("taskkill /T failed pid=%s", pid)
+        start = time.time()
+        while time.time() - start < timeout_s:
+            if not is_alive(pid):
+                return
+            time.sleep(0.05)
+        logger.warning("Stream worker still alive after taskkill pid=%s", pid)
+        return
+
+    # POSIX: terminate whole process group led by the worker.
+    try:
+        pgid = os.getpgid(pid)
+    except OSError as e:
+        logger.warning("Could not getpgid for pid=%s: %s; falling back to single process", pid, e)
+        pgid = pid
+
+    logger.info("POSIX killpg SIGTERM pgid=%s (worker pid=%s)", pgid, pid)
+    try:
+        os.killpg(pgid, signal.SIGTERM)
+    except ProcessLookupError:
+        logger.info("Process group already gone pgid=%s", pgid)
+        return
+    except Exception:
+        logger.exception("SIGTERM process group pgid=%s", pgid)
+        stop_process(pid, timeout_s=timeout_s)
+        return
+
+    start = time.time()
+    while time.time() - start < timeout_s:
+        if not is_alive(pid):
+            logger.info("Stream worker stopped after SIGTERM pgid=%s pid=%s", pgid, pid)
+            return
+        time.sleep(0.05)
+
+    logger.warning("SIGKILL process group pgid=%s pid=%s", pgid, pid)
+    try:
+        os.killpg(pgid, signal.SIGKILL)
+    except ProcessLookupError:
+        return
+    except Exception:
+        logger.exception("SIGKILL process group pgid=%s", pgid)
+
+    wait_end = time.time() + 0.5
+    while time.time() < wait_end:
+        if not is_alive(pid):
+            return
+        time.sleep(0.05)
 
 
 def safe_int(value: Optional[object]) -> Optional[int]:

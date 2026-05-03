@@ -1,11 +1,11 @@
 from __future__ import annotations
 
+import logging
 import os
 import platform
 import subprocess
 import sys
 import time
-import logging
 from datetime import datetime
 from pathlib import Path
 from typing import List
@@ -18,35 +18,82 @@ from app.config import get_settings
 from app.models.camera import Camera
 from app.models.video import Video
 from app.schemas.camera_schema import CameraCreate
-from app.services import device_service
 from app.services import camera_control_service
 from app.services import rtsp_service
-from app.services import virtual_camera_service
-from app.services.process_service import is_alive, stop_process
-
-
-VALID_STATUSES = {
-    "created",
-    "stopped",
-    "starting",
-    "running",
-    "paused",
-    "stopping",
-    "failed",
-}
+from app.services.process_service import is_alive, stop_process, stop_stream_worker
 
 logger = logging.getLogger(__name__)
 
 
+def _effective_fps(cam: Camera) -> float:
+    settings = get_settings()
+    if cam.fps is not None:
+        try:
+            f = float(cam.fps)
+            if f > 0:
+                return f
+        except Exception:
+            pass
+    return float(settings.stream_default_fps)
+
+
+def _mark_start_failed(db: Session, camera_id: str) -> Camera:
+    """
+    Best-effort reset after a failed start attempt.
+    Only flips to failed if the camera is still in `starting` to avoid clobbering
+    a concurrent stop() that already moved it to stopped.
+    """
+    db.query(Camera).filter(Camera.id == camera_id, Camera.status == "starting").update(
+        {
+            Camera.status: "failed",
+            Camera.rtsp_pid: None,
+            Camera.pid: None,
+            Camera.rtsp_url: None,
+            Camera.http_live_url: None,
+        }
+    )
+    db.commit()
+    return get_camera(db, camera_id)
+
+
+def sync_camera_process_state(db: Session, cam: Camera) -> Camera:
+    if cam.status not in {"running", "paused"}:
+        return cam
+    pid = cam.rtsp_pid
+    if pid and is_alive(pid):
+        return cam
+
+    logger.warning(
+        "Stream worker missing or dead; marking camera failed camera_id=%s status_was=%s rtsp_pid=%s",
+        cam.id,
+        cam.status,
+        pid,
+    )
+    cam.status = "failed"
+    cam.rtsp_pid = None
+    cam.pid = None
+    cam.rtsp_url = None
+    cam.http_live_url = None
+    try:
+        camera_control_service.cleanup_controls(cam.id)
+    except Exception:
+        logger.exception("cleanup_controls failed during sync camera_id=%s", cam.id)
+    db.add(cam)
+    db.commit()
+    db.refresh(cam)
+    return cam
+
+
 def list_cameras(db: Session) -> List[Camera]:
-    return db.query(Camera).order_by(Camera.created_at.desc()).all()
+    rows = db.query(Camera).order_by(Camera.created_at.desc()).all()
+    return [sync_camera_process_state(db, c) for c in rows]
 
 
 def get_camera(db: Session, camera_id: str) -> Camera:
     cam = db.query(Camera).filter(Camera.id == camera_id).first()
     if not cam:
         raise HTTPException(status_code=404, detail=f"Camera '{camera_id}' not found.")
-    return cam
+    return sync_camera_process_state(db, cam)
 
 
 def create_camera(db: Session, payload: CameraCreate) -> Camera:
@@ -64,51 +111,12 @@ def create_camera(db: Session, payload: CameraCreate) -> Camera:
     if existing:
         return existing
 
-    device_path: str
-    device_label: str | None
-
-    if device_service.is_linux():
-        try:
-            device_path, device_label = virtual_camera_service.get_or_create_virtual_camera_device(
-                db=db,
-                client_id=client_id,
-                video_id=payload.video_id,
-                video_name=video.name,
-                requested_device_path=payload.device_path,
-            )
-        except virtual_camera_service.VirtualCameraError as e:
-            raise HTTPException(status_code=400, detail=str(e)) from e
-
-        if device_service.device_used_by_any_camera(db, device_path):
-            raise HTTPException(
-                status_code=400,
-                detail=f"Device '{device_path}' is already assigned to another camera.",
-            )
-
-        if not device_service.device_exists(device_path):
-            raise HTTPException(
-                status_code=400,
-                detail=f"Device '{device_path}' not found. On Linux, load v4l2loopback first.",
-            )
-    else:
-        raw = payload.device_path
-        if raw is None or not str(raw).strip():
-            raw = "obs"
-        device_path = device_service.normalize_device_path(str(raw))
-        device_label = None
-
-        if not device_service.device_exists(device_path):
-            raise HTTPException(
-                status_code=400,
-                detail="Invalid or unsupported device_path for this platform.",
-            )
-
     cam = Camera(
         name=payload.name,
         client_id=client_id,
         video_id=payload.video_id,
-        device_path=device_path,
-        device_label=device_label,
+        device_path="",
+        device_label=None,
         status="stopped",
         pid=None,
         rtsp_pid=None,
@@ -137,7 +145,17 @@ def create_camera(db: Session, payload: CameraCreate) -> Camera:
 
 
 def start_camera(db: Session, camera_id: str) -> Camera:
+    settings = get_settings()
     cam = get_camera(db, camera_id)
+    if not settings.rtsp_enabled:
+        raise HTTPException(
+            status_code=400,
+            detail="RTSP is disabled (RTSP_ENABLED=false). Enable RTSP or set RTSP_ENABLED=1.",
+        )
+
+    # Ensure we don't start with stale process state.
+    cam = sync_camera_process_state(db, cam)
+
     video = db.query(Video).filter(Video.id == cam.video_id).first()
     if not video:
         raise HTTPException(status_code=400, detail="Camera video not found.")
@@ -146,192 +164,202 @@ def start_camera(db: Session, camera_id: str) -> Camera:
     if not video_path.exists():
         raise HTTPException(status_code=400, detail="Video file does not exist on disk.")
 
-    normalized_device = device_service.normalize_device_path(cam.device_path)
-
-    if not device_service.device_exists(normalized_device):
-        raise HTTPException(
-            status_code=400,
-            detail=f"Device '{cam.device_path}' not found. On Linux, load v4l2loopback first.",
-        )
-
-    if cam.status == "running" and cam.pid:
-        if is_alive(cam.pid):
-            raise HTTPException(status_code=400, detail="Camera is already running.")
-        cam.pid = None
-        cam.status = "failed"
-        db.add(cam)
-        db.commit()
-        db.refresh(cam)
-        raise HTTPException(status_code=400, detail="Camera was marked running but process is dead.")
-
     if cam.status == "paused":
         raise HTTPException(status_code=400, detail="Camera is paused. Use resume instead.")
 
-    if device_service.device_used_by_running_camera(db, normalized_device):
-        raise HTTPException(
-            status_code=400,
-            detail=f"Device '{cam.device_path}' is already used by a running camera.",
+    if cam.status == "starting":
+        raise HTTPException(status_code=409, detail="Camera is already starting.")
+
+    if cam.status == "running" and cam.rtsp_pid and is_alive(cam.rtsp_pid):
+        return cam
+
+    # If another request is racing with this one, we must acquire a \"starting\" lock
+    # before spawning the worker, otherwise two workers could be created.
+    #
+    # For SQLite, keep it simple: update the row to starting BEFORE spawning.
+    updated = (
+        db.query(Camera)
+        .filter(
+            Camera.id == cam.id,
+            Camera.status.in_({"stopped", "failed"}),
         )
-
-    settings = get_settings()
-    # Ensure controls exist and a fresh start isn't accidentally paused.
-    camera_control_service.camera_control_dir(cam.id).mkdir(parents=True, exist_ok=True)
-    camera_control_service.clear_paused(cam.id)
-    settings.logs_dir.mkdir(parents=True, exist_ok=True)
-    log_path = settings.logs_dir / f"camera_{cam.id}.log"
-
-    # Spawn worker from `src/backend`: `python -m app.workers.camera_worker ...`
-    cmd = [
-        sys.executable,
-        "-m",
-        "app.workers.camera_worker",
-        "--camera-id",
-        cam.id,
-        "--video-path",
-        str(video_path),
-        "--loop" if cam.loop else "--no-loop",
-        "--control-dir",
-        str(camera_control_service.camera_control_dir(cam.id)),
-    ]
-    # Linux: explicit /dev/videoX. macOS/Windows: let pyvirtualcam pick platform backend (e.g. OBS).
-    if platform.system().lower() == "linux":
-        cmd += ["--device-path", normalized_device]
-    if cam.fps:
-        cmd += ["--fps", str(cam.fps)]
-    if cam.width:
-        cmd += ["--width", str(cam.width)]
-    if cam.height:
-        cmd += ["--height", str(cam.height)]
-
-    with log_path.open("a", encoding="utf-8") as log_file:
-        log_file.write(f"\n=== start {datetime.utcnow().isoformat()}Z ===\n")
-        log_file.write("CMD: " + " ".join(cmd) + "\n")
-        log_file.flush()
-
-        popen_kwargs = {
-            "cwd": str(Path(__file__).resolve().parents[2]),  # `src/backend`
-            "stdout": log_file,
-            "stderr": subprocess.STDOUT,
-            "stdin": subprocess.DEVNULL,
-            "text": True,
-            "close_fds": True,
-        }
-        if platform.system().lower().startswith("win"):
-            popen_kwargs["creationflags"] = (
-                subprocess.CREATE_NEW_PROCESS_GROUP | subprocess.DETACHED_PROCESS
-            )
-
-        proc = subprocess.Popen(cmd, **popen_kwargs)
-        logger.info(
-            "Started camera worker camera_id=%s worker_pid=%s backend_pid=%s os=%s",
-            cam.id,
-            proc.pid,
-            os.getpid(),
-            platform.system(),
+        .update(
+            {
+                Camera.status: "starting",
+                Camera.rtsp_pid: None,
+                Camera.pid: None,
+                Camera.rtsp_url: None,
+                Camera.http_live_url: None,
+            }
         )
+    )
+    if updated != 1:
+        # Someone else beat us to it: reload and respond based on current state.
+        db.rollback()
+        fresh = get_camera(db, cam.id)
+        if fresh.status == "running" and fresh.rtsp_pid and is_alive(fresh.rtsp_pid):
+            return fresh
+        if fresh.status == "paused":
+            raise HTTPException(status_code=400, detail="Camera is paused. Use resume instead.")
+        if fresh.status == "starting":
+            raise HTTPException(status_code=409, detail="Camera is already starting.")
+        # Fallback: not in a startable state.
+        raise HTTPException(status_code=409, detail=f"Camera cannot be started from status '{fresh.status}'.")
 
-        # Give the worker a moment to fail fast if pyvirtualcam can't initialize.
-        time.sleep(0.25)
-        if proc.poll() is not None:
-            cam.pid = None
-            cam.status = "failed"
-            db.add(cam)
-            db.commit()
-            db.refresh(cam)
-            raise HTTPException(
-                status_code=400,
-                detail=f"Worker failed to start. Check log: {log_path}",
-            )
-
-    cam.pid = proc.pid
-    cam.status = "running"
-    cam.last_started_at = datetime.utcnow()
-    db.add(cam)
     db.commit()
-    db.refresh(cam)
+    cam = get_camera(db, cam.id)
+    if cam.status != "starting":
+        # Shouldn't happen, but fail safe: never spawn without the lock.
+        raise HTTPException(status_code=409, detail="Camera start was preempted by another request.")
 
-    # Start RTSP sidecar FFmpeg process (must not break the primary worker).
-    cam.rtsp_pid = None
-    cam.rtsp_url = None
-    cam.http_live_url = None
-    if settings.rtsp_enabled:
-        try:
-            with log_path.open("a", encoding="utf-8") as log_file:
-                rtsp_proc, _push_url = rtsp_service.start_rtsp_process(
-                    camera_id=cam.id,
-                    video_path=video_path,
-                    device_path=normalized_device,
-                    loop=bool(cam.loop),
-                    fps=cam.fps,
-                    width=cam.width,
-                    height=cam.height,
-                    log_file=log_file,
+    # Anything after we acquire `starting` must not leave the camera stuck in `starting`.
+    try:
+        ctrl = camera_control_service.camera_control_dir(cam.id)
+        ctrl.mkdir(parents=True, exist_ok=True)
+        camera_control_service.clear_paused(cam.id)
+        settings.logs_dir.mkdir(parents=True, exist_ok=True)
+        log_path = settings.logs_dir / f"camera_{cam.id}.log"
+
+        eff_fps = _effective_fps(cam)
+        cmd = [
+            sys.executable,
+            "-m",
+            "app.workers.stream_worker",
+            "--camera-id",
+            cam.id,
+            "--video-path",
+            str(video_path),
+            "--loop" if cam.loop else "--no-loop",
+            "--control-dir",
+            str(ctrl),
+            "--rtsp-push-url",
+            rtsp_service.build_rtsp_push_url(cam.id),
+            "--ffmpeg-binary",
+            settings.ffmpeg_binary,
+            "--fps",
+            str(eff_fps),
+        ]
+        if cam.width:
+            cmd += ["--width", str(cam.width)]
+        if cam.height:
+            cmd += ["--height", str(cam.height)]
+
+        with log_path.open("a", encoding="utf-8") as log_file:
+            log_file.write(f"\n=== stream start {datetime.utcnow().isoformat()}Z ===\n")
+            log_file.write("CMD: " + " ".join(cmd) + "\n")
+            log_file.flush()
+
+            popen_kwargs: dict = {
+                "cwd": str(Path(__file__).resolve().parents[2]),
+                "stdout": log_file,
+                "stderr": subprocess.STDOUT,
+                "stdin": subprocess.DEVNULL,
+                "text": True,
+                "close_fds": True,
+            }
+            if platform.system().lower().startswith("win"):
+                popen_kwargs["creationflags"] = (
+                    subprocess.CREATE_NEW_PROCESS_GROUP | subprocess.DETACHED_PROCESS
                 )
+            else:
+                popen_kwargs["start_new_session"] = True
 
-                time.sleep(0.25)
-                if rtsp_proc.poll() is not None:
-                    logger.error(
-                        "RTSP ffmpeg exited immediately camera_id=%s returncode=%s; keeping worker running. log=%s",
-                        cam.id,
-                        rtsp_proc.returncode,
-                        log_path,
-                    )
-                else:
-                    cam.rtsp_pid = rtsp_proc.pid
-                    cam.rtsp_url = rtsp_service.build_rtsp_public_url(cam.id)
-                    cam.http_live_url = rtsp_service.build_http_live_url(cam.id)
+            proc = subprocess.Popen(cmd, **popen_kwargs)
+
+            logger.info(
+                "Started stream_worker camera_id=%s worker_pid=%s backend_pid=%s os=%s",
+                cam.id,
+                proc.pid,
+                os.getpid(),
+                platform.system(),
+            )
+
+            time.sleep(0.35)
+            if proc.poll() is not None:
+                cam = _mark_start_failed(db, cam.id)
+                rc = proc.returncode
+                raise HTTPException(
+                    status_code=400,
+                    detail=f"Stream worker exited immediately (code {rc}). Check log: {log_path}",
+                )
+    except HTTPException:
+        # Worker-exited path already marked failed above; for setup errors this ensures we don't stick in starting.
+        if get_camera(db, cam.id).status == "starting":
+            _mark_start_failed(db, cam.id)
+        raise
+    except Exception as e:
+        _mark_start_failed(db, cam.id)
+        raise HTTPException(status_code=500, detail=f"Failed to start camera: {e}") from e
+
+    # Transition starting -> running only if still starting (stop could race).
+    updated = (
+        db.query(Camera)
+        .filter(Camera.id == cam.id, Camera.status == "starting")
+        .update(
+            {
+                Camera.status: "running",
+                Camera.rtsp_pid: proc.pid,
+                Camera.pid: None,
+                Camera.rtsp_url: rtsp_service.build_rtsp_public_url(cam.id),
+                Camera.http_live_url: rtsp_service.build_http_live_url(cam.id),
+                Camera.last_started_at: datetime.utcnow(),
+            }
+        )
+    )
+    db.commit()
+    cam = get_camera(db, cam.id)
+    if updated != 1:
+        # Camera was stopped/changed while starting; ensure worker is not left behind.
+        try:
+            stop_stream_worker(proc.pid)
         except Exception:
-            logger.exception("Failed to start RTSP for camera_id=%s; keeping worker running", cam.id)
-            cam.rtsp_pid = None
-            cam.rtsp_url = None
-            cam.http_live_url = None
-
-        db.add(cam)
-        db.commit()
-        db.refresh(cam)
+            logger.exception("Failed to stop orphaned worker after start race camera_id=%s pid=%s", cam.id, proc.pid)
+        raise HTTPException(status_code=409, detail="Camera start was interrupted. Try again.")
 
     return cam
 
 
 def stop_camera(db: Session, camera_id: str) -> Camera:
     cam = get_camera(db, camera_id)
-
-    # Always cleanup pause/resume controls on stop.
     camera_control_service.cleanup_controls(cam.id)
 
-    # Stop RTSP first (sidecar), then the main worker.
+    # If we're in the middle of starting and no pid is recorded yet, just reset safely.
+    if cam.status == "starting" and not cam.rtsp_pid:
+        cam.status = "stopped"
+        cam.pid = None
+        cam.rtsp_pid = None
+        cam.rtsp_url = None
+        cam.http_live_url = None
+        cam.last_stopped_at = datetime.utcnow()
+        db.add(cam)
+        db.commit()
+        db.refresh(cam)
+        return cam
+
     if cam.rtsp_pid:
-        rtsp_pid = cam.rtsp_pid
+        rtp = cam.rtsp_pid
         logger.info(
-            "Stop RTSP requested camera_id=%s rtsp_pid=%s os=%s",
+            "Stop stream worker camera_id=%s rtsp_pid=%s os=%s",
             cam.id,
-            rtsp_pid,
+            rtp,
             platform.system(),
         )
         try:
-            stop_process(rtsp_pid)
+            stop_stream_worker(rtp)
         except Exception:
-            logger.exception("Failed to stop RTSP process camera_id=%s pid=%s", cam.id, rtsp_pid)
+            logger.exception("Failed to stop stream worker camera_id=%s pid=%s", cam.id, rtp)
         finally:
             cam.rtsp_pid = None
 
     if cam.pid:
-        pid = cam.pid
-        logger.info(
-            "Stop camera requested camera_id=%s pid=%s os=%s",
-            cam.id,
-            pid,
-            platform.system(),
-        )
+        p = cam.pid
+        logger.info("Stop legacy worker camera_id=%s pid=%s", cam.id, p)
         try:
-            stop_process(pid)
+            stop_process(p)
         except Exception:
-            # Never crash the API on stop; log and proceed to mark camera stopped.
-            logger.exception("Failed to stop worker process camera_id=%s pid=%s", cam.id, pid)
+            logger.exception("Failed to stop legacy worker camera_id=%s pid=%s", cam.id, p)
         finally:
             cam.pid = None
-    else:
-        logger.info("Stop camera requested camera_id=%s pid=None (already stopped?)", cam.id)
 
     cam.status = "stopped"
     cam.last_stopped_at = datetime.utcnow()
@@ -350,11 +378,12 @@ def restart_camera(db: Session, camera_id: str) -> Camera:
 
 def delete_camera(db: Session, camera_id: str) -> None:
     cam = get_camera(db, camera_id)
-    if cam.status in {"running", "paused"} or cam.pid or cam.rtsp_pid:
+    if cam.status in {"running", "paused"} or cam.rtsp_pid or cam.pid:
         stop_camera(db, camera_id)
-        cam = get_camera(db, camera_id)
-
     camera_control_service.cleanup_controls(camera_id)
+    cam = db.query(Camera).filter(Camera.id == camera_id).first()
+    if not cam:
+        return
     db.delete(cam)
     db.commit()
 
@@ -368,24 +397,16 @@ def pause_camera(db: Session, camera_id: str) -> Camera:
     if cam.status != "running":
         raise HTTPException(status_code=400, detail="Camera must be running to pause.")
 
-    if not cam.pid or not is_alive(cam.pid):
-        raise HTTPException(status_code=400, detail="Camera worker process is not running.")
-
-    # RTSP pause behavior:
-    # - Linux: FFmpeg reads from the v4l2 device; freezing the worker output freezes RTSP naturally.
-    # - Non-Linux: FFmpeg reads directly from the video file (see rtsp_service), so pausing the worker
-    #   does NOT pause RTSP playback. We intentionally do not try to pause FFmpeg cross-platform.
-    if cam.rtsp_pid and platform.system().lower() != "linux":
-        logger.warning(
-            "Camera paused but RTSP sidecar is file-based on this OS; RTSP may keep advancing. camera_id=%s os=%s",
-            cam.id,
-            platform.system(),
+    if not cam.rtsp_pid or not is_alive(cam.rtsp_pid):
+        raise HTTPException(
+            status_code=400,
+            detail="Camera stream worker is not running. Restart the camera.",
         )
 
     try:
         camera_control_service.set_paused(cam.id)
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Failed to pause camera: {e}") from e
+    except camera_control_service.CameraControlError as e:
+        raise HTTPException(status_code=500, detail=str(e)) from e
 
     if not camera_control_service.is_paused(cam.id):
         raise HTTPException(status_code=500, detail="Failed to pause camera: pause flag was not created.")
@@ -405,13 +426,16 @@ def resume_camera(db: Session, camera_id: str) -> Camera:
     if cam.status != "paused":
         raise HTTPException(status_code=400, detail="Camera must be paused to resume.")
 
-    if not cam.pid or not is_alive(cam.pid):
-        raise HTTPException(status_code=400, detail="Camera worker process is not running.")
+    if not cam.rtsp_pid or not is_alive(cam.rtsp_pid):
+        raise HTTPException(
+            status_code=400,
+            detail="Camera stream worker is not running. Restart the camera.",
+        )
 
     try:
         camera_control_service.clear_paused(cam.id)
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Failed to resume camera: {e}") from e
+    except camera_control_service.CameraControlError as e:
+        raise HTTPException(status_code=500, detail=str(e)) from e
 
     if camera_control_service.is_paused(cam.id):
         raise HTTPException(status_code=500, detail="Failed to resume camera: pause flag still exists.")
@@ -420,4 +444,3 @@ def resume_camera(db: Session, camera_id: str) -> Camera:
     db.commit()
     db.refresh(cam)
     return cam
-

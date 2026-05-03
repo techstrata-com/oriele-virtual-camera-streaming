@@ -86,7 +86,7 @@ def _mjpeg_frames(
 @router.get("/live/{camera_id}")
 def live_mjpeg(camera_id: str, db: Session = Depends(get_db)):
     cam = camera_service.get_camera(db, camera_id)
-    if cam.status not in {"running", "paused"} or not cam.pid:
+    if cam.status not in {"running", "paused"} or not cam.rtsp_pid:
         raise HTTPException(status_code=409, detail="Camera is not running.")
 
     video = db.query(Video).filter(Video.id == cam.video_id).first()

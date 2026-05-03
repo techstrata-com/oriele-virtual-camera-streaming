@@ -15,7 +15,11 @@ def create_app() -> FastAPI:
 
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
 
-    app = FastAPI(title="Virtual Camera Platform", version="0.1.0")
+    app = FastAPI(
+        title="Video streaming API",
+        version="0.1.0",
+        description="Upload videos, run per-camera RTSP/HTTP live stream sessions (FFmpeg + MediaMTX).",
+    )
     app.add_middleware(
         CORSMiddleware,
         allow_origins=["*"],

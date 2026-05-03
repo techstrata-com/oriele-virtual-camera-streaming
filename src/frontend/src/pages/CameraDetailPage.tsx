@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useState } from "react";
 import { Link, useParams } from "react-router-dom";
-import { getCamera, restartCamera, startCamera, stopCamera } from "../api/cameras";
+import { getCamera, pauseCamera, restartCamera, resumeCamera, startCamera, stopCamera } from "../api/cameras";
 import { getVideo } from "../api/videos";
 import type { Camera } from "../types/camera";
 import type { Video } from "../types/video";
@@ -34,6 +34,10 @@ export default function CameraDetailPage() {
     const cls =
       camera.status === "running"
         ? "badge running"
+        : camera.status === "paused"
+          ? "badge paused"
+          : camera.status === "starting"
+            ? "badge starting"
         : camera.status === "failed"
           ? "badge failed"
           : "badge";
@@ -56,6 +60,14 @@ export default function CameraDetailPage() {
     if (!camera) return;
     setCamera(await restartCamera(camera.id));
   }
+  async function onPause() {
+    if (!camera) return;
+    setCamera(await pauseCamera(camera.id));
+  }
+  async function onResume() {
+    if (!camera) return;
+    setCamera(await resumeCamera(camera.id));
+  }
 
   return (
     <div className="container">
@@ -71,11 +83,25 @@ export default function CameraDetailPage() {
             </div>
           </div>
           <div className="row">
-            <button className="btn primary" onClick={onStart} disabled={camera?.status === "running"}>
+            <button
+              className="btn primary"
+              onClick={onStart}
+              disabled={!camera || camera.status === "running" || camera.status === "paused" || camera.status === "starting"}
+            >
               Start
             </button>
-            <button className="btn" onClick={onStop} disabled={camera?.status !== "running"}>
+            <button
+              className="btn"
+              onClick={onStop}
+              disabled={!camera || !(camera.status === "running" || camera.status === "paused" || camera.status === "starting")}
+            >
               Stop
+            </button>
+            <button className="btn" onClick={onPause} disabled={!camera || camera.status !== "running"}>
+              Pause
+            </button>
+            <button className="btn" onClick={onResume} disabled={!camera || camera.status !== "paused"}>
+              Resume
             </button>
             <button className="btn" onClick={onRestart} disabled={!camera}>
               Restart
@@ -91,27 +117,66 @@ export default function CameraDetailPage() {
         {camera && (
           <div style={{ marginTop: 12 }} className="grid">
             <div className="panel">
-              <h2>Camera details</h2>
+              <h2>Stream session</h2>
               <div className="muted">
                 Client: <code>{camera.client_id ?? "—"}</code>
               </div>
-              <div className="muted" style={{ marginTop: 6 }}>
-                Device label: {camera.device_label ?? "—"}
-              </div>
-              <div className="muted" style={{ marginTop: 6 }}>
-                Device path: <code>{camera.device_path}</code>
-              </div>
-              <div className="muted">PID: {camera.pid ?? "—"}</div>
+              <div className="muted">RTSP worker PID: {camera.rtsp_pid ?? "—"}</div>
               <div className="muted">FPS: {camera.fps ?? "—"}</div>
               <div className="muted">
                 Resolution: {camera.width && camera.height ? `${camera.width}x${camera.height}` : "—"}
               </div>
               <div className="muted">Loop: {camera.loop ? "Yes" : "No"}</div>
-              <div className="row" style={{ marginTop: 10 }}>
-                <button className="btn" onClick={() => onCopy(camera.device_path)}>
-                  Copy device path
-                </button>
+
+              <div style={{ marginTop: 10 }}>
+                <div className="muted" style={{ marginBottom: 6 }}>
+                  RTSP URL
+                </div>
+                {(camera.status === "running" || camera.status === "paused") && camera.rtsp_url ? (
+                  <div className="row">
+                    <code style={{ wordBreak: "break-all" }}>{camera.rtsp_url}</code>
+                    <button className="btn sm" onClick={() => onCopy(camera.rtsp_url!)}>
+                      Copy
+                    </button>
+                  </div>
+                ) : (
+                  <div className="muted">Not available</div>
+                )}
               </div>
+
+              <div style={{ marginTop: 10 }}>
+                <div className="muted" style={{ marginBottom: 6 }}>
+                  HTTP live URL
+                </div>
+                {(camera.status === "running" || camera.status === "paused") && camera.http_live_url ? (
+                  <div className="row">
+                    <code style={{ wordBreak: "break-all" }}>{camera.http_live_url}</code>
+                    <button className="btn sm" onClick={() => onCopy(camera.http_live_url!)}>
+                      Copy
+                    </button>
+                    <button className="btn sm" onClick={() => window.open(camera.http_live_url!, "_blank", "noopener,noreferrer")}>
+                      Open
+                    </button>
+                  </div>
+                ) : (
+                  <div className="muted">Not available</div>
+                )}
+              </div>
+
+              {(camera.device_path || camera.device_label || camera.pid) && (
+                <details style={{ marginTop: 12 }}>
+                  <summary className="muted" style={{ cursor: "pointer" }}>Legacy / debug</summary>
+                  <div className="muted" style={{ marginTop: 8 }}>
+                    device_label: {camera.device_label ?? "—"}
+                  </div>
+                  <div className="muted" style={{ marginTop: 6 }}>
+                    device_path: <code>{camera.device_path ?? "—"}</code>
+                  </div>
+                  <div className="muted" style={{ marginTop: 6 }}>
+                    pid: {camera.pid ?? "—"}
+                  </div>
+                </details>
+              )}
             </div>
             <div className="panel">
               <h2>Video</h2>

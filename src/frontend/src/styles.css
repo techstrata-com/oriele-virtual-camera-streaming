@@ -385,6 +385,16 @@ label {
   color: var(--accent);
 }
 
+.badge.paused {
+  border-color: rgba(251, 191, 36, 0.35);
+  color: var(--warn);
+}
+
+.badge.starting {
+  border-color: rgba(59, 130, 246, 0.35);
+  color: #93c5fd;
+}
+
 .badge.failed {
   border-color: rgba(251, 113, 133, 0.35);
   color: var(--danger);

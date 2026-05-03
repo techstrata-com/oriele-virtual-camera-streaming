@@ -1,7 +1,14 @@
 import { Link } from "react-router-dom";
 import { useState } from "react";
 import type { Camera } from "../types/camera";
-import { deleteCamera, restartCamera, startCamera, stopCamera } from "../api/cameras";
+import {
+  deleteCamera,
+  pauseCamera,
+  restartCamera,
+  resumeCamera,
+  startCamera,
+  stopCamera,
+} from "../api/cameras";
 
 type Props = {
   cameras: Camera[];
@@ -12,6 +19,8 @@ type Props = {
 
 function statusClass(status: string): string {
   if (status === "running") return "badge running";
+  if (status === "paused") return "badge paused";
+  if (status === "starting") return "badge starting";
   if (status === "failed") return "badge failed";
   return "badge";
 }
@@ -19,12 +28,22 @@ function statusClass(status: string): string {
 export default function CameraList({ cameras, videoNameById, onChanged, onDeleted }: Props) {
   const [busyId, setBusyId] = useState<string | null>(null);
   const [busyAction, setBusyAction] = useState<string | null>(null);
+  const [rowError, setRowError] = useState<Record<string, string | null>>({});
 
   async function runRowAction(id: string, action: string, fn: () => Promise<void>) {
     setBusyId(id);
     setBusyAction(action);
+    setRowError((prev) => ({ ...prev, [id]: null }));
     try {
       await fn();
+    } catch (err: any) {
+      const status = err?.response?.status;
+      const detail = err?.response?.data?.detail ?? "Request failed.";
+      if (status === 409 && typeof detail === "string" && detail.toLowerCase().includes("starting")) {
+        setRowError((prev) => ({ ...prev, [id]: "This stream is already starting. Please refresh in a moment." }));
+      } else {
+        setRowError((prev) => ({ ...prev, [id]: detail }));
+      }
     } finally {
       setBusyId(null);
       setBusyAction(null);
@@ -49,6 +68,18 @@ export default function CameraList({ cameras, videoNameById, onChanged, onDelete
       onChanged(cam);
     });
   }
+  async function onPause(id: string) {
+    await runRowAction(id, "pause", async () => {
+      const cam = await pauseCamera(id);
+      onChanged(cam);
+    });
+  }
+  async function onResume(id: string) {
+    await runRowAction(id, "resume", async () => {
+      const cam = await resumeCamera(id);
+      onChanged(cam);
+    });
+  }
   async function onDelete(id: string) {
     if (!confirm("Delete this camera? If running, it will be stopped.")) return;
     await runRowAction(id, "delete", async () => {
@@ -65,11 +96,16 @@ export default function CameraList({ cameras, videoNameById, onChanged, onDelete
 
   return (
     <div className="panel cameras-panel">
-      <h2>Cameras</h2>
+      <h2>Stream sessions</h2>
 
       <div className="camera-list">
         {cameras.map((c) => {
           const rowBusy = busyId === c.id;
+          const startDisabled = rowBusy || c.status === "running" || c.status === "paused" || c.status === "starting";
+          const stopEnabled = !rowBusy && (c.status === "running" || c.status === "paused" || c.status === "starting");
+          const pauseEnabled = !rowBusy && c.status === "running";
+          const resumeEnabled = !rowBusy && c.status === "paused";
+          const deleteDisabled = rowBusy || c.status === "starting";
           return (
             <div className="camera-row" key={c.id}>
               <div className="camera-main">
@@ -88,47 +124,32 @@ export default function CameraList({ cameras, videoNameById, onChanged, onDelete
                     <span className="camera-sub-label">Client</span> {c.client_id ?? "—"}
                   </span>
                   <span className="camera-sub-item">
-                    <span className="camera-sub-label">PID</span> {c.pid ?? "—"}
+                    <span className="camera-sub-label">RTSP worker PID</span> {c.rtsp_pid ?? "—"}
                   </span>
                 </div>
 
                 <div className="camera-meta">
-                  <div className="camera-meta-item">
-                    <span className="camera-meta-label">Device</span>
-                    <span className="mono" style={{ wordBreak: "break-all" }}>
-                      {c.device_label ? (
-                        <>
-                          {c.device_label}{" "}
-                          <span className="muted">({c.device_path})</span>
-                        </>
-                      ) : (
-                        <code>{c.device_path}</code>
-                      )}
-                    </span>
-                    <button className="btn sm" onClick={() => onCopy(c.device_path)} disabled={rowBusy}>
-                      Copy path
-                    </button>
-                  </div>
-
                   <div className="camera-meta-item muted">
                     <span className="camera-meta-label">Output</span>
                     {c.width && c.height ? `${c.width}×${c.height}` : "—"}{" "}
                     {c.fps ? `@ ${c.fps.toFixed(2)} fps` : ""}
                   </div>
                 </div>
+
+                {rowError[c.id] && <div className="error" style={{ marginTop: 10 }}>{rowError[c.id]}</div>}
               </div>
 
               <div className="camera-streams">
                 <div className="stream-block">
                   <div className="stream-header">
                     <span className="stream-label">RTSP</span>
-                    {c.status === "running" && c.rtsp_url ? (
+                    {(c.status === "running" || c.status === "paused") && c.rtsp_url ? (
                       <span className="stream-pill ok">ready</span>
                     ) : (
                       <span className="stream-pill">—</span>
                     )}
                   </div>
-                  {c.status === "running" && c.rtsp_url ? (
+                  {(c.status === "running" || c.status === "paused") && c.rtsp_url ? (
                     <>
                       <code className="stream-url" title={c.rtsp_url}>
                         {c.rtsp_url}
@@ -147,13 +168,13 @@ export default function CameraList({ cameras, videoNameById, onChanged, onDelete
                 <div className="stream-block">
                   <div className="stream-header">
                     <span className="stream-label">HTTP Live</span>
-                    {c.status === "running" && c.http_live_url ? (
+                    {(c.status === "running" || c.status === "paused") && c.http_live_url ? (
                       <span className="stream-pill ok">ready</span>
                     ) : (
                       <span className="stream-pill">—</span>
                     )}
                   </div>
-                  {c.status === "running" && c.http_live_url ? (
+                  {(c.status === "running" || c.status === "paused") && c.http_live_url ? (
                     <>
                       <code className="stream-url" title={c.http_live_url}>
                         {c.http_live_url}
@@ -177,32 +198,48 @@ export default function CameraList({ cameras, videoNameById, onChanged, onDelete
                 <button
                   className="btn primary sm"
                   onClick={() => onStart(c.id)}
-                  disabled={rowBusy || c.status === "running"}
-                  title="Start camera"
+                  disabled={startDisabled}
+                  title="Start stream"
                 >
                   {rowBusy && busyAction === "start" ? "Starting…" : "Start"}
                 </button>
                 <button
                   className="btn sm"
                   onClick={() => onStop(c.id)}
-                  disabled={rowBusy || c.status !== "running"}
-                  title="Stop camera"
+                  disabled={!stopEnabled}
+                  title="Stop stream"
                 >
                   {rowBusy && busyAction === "stop" ? "Stopping…" : "Stop"}
                 </button>
                 <button
                   className="btn sm"
+                  onClick={() => onPause(c.id)}
+                  disabled={!pauseEnabled}
+                  title="Pause stream"
+                >
+                  {rowBusy && busyAction === "pause" ? "Pausing…" : "Pause"}
+                </button>
+                <button
+                  className="btn sm"
+                  onClick={() => onResume(c.id)}
+                  disabled={!resumeEnabled}
+                  title="Resume stream"
+                >
+                  {rowBusy && busyAction === "resume" ? "Resuming…" : "Resume"}
+                </button>
+                <button
+                  className="btn sm"
                   onClick={() => onRestart(c.id)}
                   disabled={rowBusy}
-                  title="Restart camera"
+                  title="Restart stream"
                 >
                   {rowBusy && busyAction === "restart" ? "Restarting…" : "Restart"}
                 </button>
                 <button
                   className="btn danger sm"
                   onClick={() => onDelete(c.id)}
-                  disabled={rowBusy}
-                  title="Delete camera"
+                  disabled={deleteDisabled}
+                  title="Delete stream session"
                 >
                   {rowBusy && busyAction === "delete" ? "Deleting…" : "Delete"}
                 </button>
@@ -211,7 +248,7 @@ export default function CameraList({ cameras, videoNameById, onChanged, onDelete
           );
         })}
 
-        {cameras.length === 0 && <div className="muted" style={{ padding: 10 }}>No cameras created yet.</div>}
+        {cameras.length === 0 && <div className="muted" style={{ padding: 10 }}>No stream sessions created yet.</div>}
       </div>
     </div>
   );

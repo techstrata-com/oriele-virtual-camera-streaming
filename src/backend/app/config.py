@@ -4,7 +4,11 @@ import os
 from functools import lru_cache
 from pathlib import Path
 
+from dotenv import load_dotenv
 from pydantic import BaseModel
+
+_BACKEND_DIR = Path(__file__).resolve().parents[1]
+load_dotenv(_BACKEND_DIR / ".env", override=False)
 
 
 def _env_bool(name: str, default: bool) -> bool:
